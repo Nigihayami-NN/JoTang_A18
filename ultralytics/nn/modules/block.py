@@ -2078,19 +2078,71 @@ class RealNVP(nn.Module):
 #加入 PassThrough, RGB_Stem, Thermal_Stem, SPDConv, CBAMFusion, TransformerFusion
 
 class PassThrough(nn.Module):
-    pass
+    """
+    零计算量的数据截留层, 使得后面的层可以拿到数据。
+    接收输入张量，原封不动地返回。
+    """
+    def __init__(self, c1, c2):
+        super().__init__()
+        pass
+    def forward(self, images):
+        return images
 
 class RGB_Stem(nn.Module):
-    # def __init__(self, c1, c2, k=3, s=2):  # c1 会被传入 4
-    #     super().__init__()
-    #     self.conv = Conv(3, c2, k, s)  # 但这里我们只用 3
-    pass
+    """
+    RGB 支路的入口层。
+    负责从 4 通道三明治中剥离前 3 个通道，并进行初始卷积。
+    """
+    def __init__(self, c1, c2, k=3, s=2):
+        super().__init__()
+        self.conv = Conv(3, c2, k, s)
+        """
+        卷积 1024x1024 -> 512x512. yolo26x，64 * 1.5 = 96 通道
+        """
+
+    def forward(self, images):# batchsize, channel=4, h, w
+        rgb_img = images[:,0:3,:,:]
+        rgb_img = self.conv(rgb_img)
+        return rgb_img #batchsize, channel=3, h, w
 
 class Thermal_Stem(nn.Module):
-    pass
+    """
+       Thermal 支路的入口层。
+       负责提取第 4 个通道，并进行初始卷积。
+    """
+    def __init__(self, c1, c2, k=3, s=2):
+        super().__init__()
+        self.conv = Conv(1, c2, k, s)
+
+    def forward(self, images):
+        thm_img = images[:,3:4,:,:]
+        thm_img = self.conv(thm_img)
+        return thm_img
+
+class space_to_depth(nn.Module):
+    """
+        SPD层的辅助类
+    """
+    def __init__(self):
+        super().__init__()
+        pass
+    def forward(self, data):
+        return torch.cat((data[:,:,0::2,0::2],
+                       data[:,:,0::2,1::2],
+                       data[:,:,1::2,0::2],
+                       data[:,:,1::2,1::2]),dim=1)#通道维度拼接
+
 
 class SPDConv(nn.Module):
-    pass
+    def __init__(self,c1, c2, k=3, s=1, p=None, g=1, d=1):
+        super().__init__()
+        self.spd = space_to_depth()
+        self.conv = Conv(c1*4, c2, k, s, p, g, d)
+
+    def forward(self, data):
+        data = self.spd(data)
+        data = self.conv(data)
+        return data
 
 class CBAMFusion(nn.Module):
     pass
