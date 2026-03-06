@@ -6,6 +6,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+#from IPython.terminal.shortcuts.filters import PassThrough
 
 from ultralytics.utils.torch_utils import fuse_conv_and_bn
 
@@ -52,6 +53,12 @@ __all__ = (
     "ResNetLayer",
     "SCDown",
     "TorchVision",
+    "PassThrough",
+    "RGB_Stem",
+    "Thermal_Stem",
+    "SPDConv",
+    "CBAMFusion",
+    "TransformerFusion",
 )
 
 
@@ -2065,3 +2072,29 @@ class RealNVP(nn.Module):
             self.float()
         z, log_det = self.backward_p(x)
         return self.prior.log_prob(z) + log_det
+
+
+
+#加入 PassThrough, RGB_Stem, Thermal_Stem, SPDConv, CBAMFusion, TransformerFusion
+
+class PassThrough(nn.Module):
+    pass
+
+class RGB_Stem(nn.Module):
+    # def __init__(self, c1, c2, k=3, s=2):  # c1 会被传入 4
+    #     super().__init__()
+    #     self.conv = Conv(3, c2, k, s)  # 但这里我们只用 3
+    pass
+
+class Thermal_Stem(nn.Module):
+    pass
+
+class SPDConv(nn.Module):
+    pass
+
+class CBAMFusion(nn.Module):
+    pass
+
+class TransformerFusion(nn.Module):
+    pass
+
