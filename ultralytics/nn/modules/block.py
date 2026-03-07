@@ -2145,8 +2145,53 @@ class SPDConv(nn.Module):
         return data
 
 class CBAMFusion(nn.Module):
-    pass
+    """
+        轻量自注意力
+    """
+    def __init__(self, c1, reduction_ratio=16):
+        super().__init__()
+        self.reduce_conv = Conv(c1*2, c1)
+
+        c_reduced = max(1, c1//reduction_ratio)
+        self.mlp = nn.Sequential(
+            nn.Conv2d(c1, c_reduced, 1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(c_reduced, c1, 1, bias=False),
+        )
+        self.ch_sigmoid = nn.Sigmoid()
+
+        self.conv1 = nn.Conv2d(2, 1, 7, 1 ,padding=3)
+        self.ch_avg = nn.AdaptiveAvgPool2d((1, 1))
+        self.ch_max = nn.AdaptiveMaxPool2d((1, 1))
+        self.sp_sigmoid = nn.Sigmoid()
+
+    def forward(self, x):# 传入以及拼接好的rgb, thm
+        x = self.reduce_conv(x)# 通道减半，B,c1,h,w
+
+        # 通道注意力机制，h*w->1*1
+        ch_avg = self.ch_avg(x)
+        ch_max = self.ch_max(x)
+
+        # 通道逻辑
+        ch_avg = self.mlp(ch_avg)
+        ch_max = self.mlp(ch_max)
+
+        ch_att = self.ch_sigmoid(ch_avg + ch_max)
+
+        x = x * ch_att
+
+        # 空间注意力机制，通道压为一层
+        sp_avg = torch.mean(x, dim=1, keepdim=True)
+        sp_max, _ = torch.max(x, dim=1, keepdim=True)
+
+        # 空间逻辑
+        sp_att = self.conv1(torch.cat((sp_avg, sp_max), dim=1))
+        sp_att = self.sp_sigmoid(sp_att)
+
+        x = x * sp_att
+
+        return x
+
 
 class TransformerFusion(nn.Module):
     pass
-
