@@ -3,9 +3,13 @@
 
 from __future__ import annotations
 
+from cmath import sqrt
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.functional import softmax
+
 #from IPython.terminal.shortcuts.filters import PassThrough
 
 from ultralytics.utils.torch_utils import fuse_conv_and_bn
@@ -2076,7 +2080,7 @@ class RealNVP(nn.Module):
 
 
 
-#加入 PassThrough, RGB_Stem, Thermal_Stem, SPDConv, CBAMFusion, TransformerFusion
+#加入 PassThrough, RGB_Stem, Thermal_Stem, SPDConv, CBAMFusion, Swin_Transformer_Fusion
 
 class PassThrough(nn.Module):
     """
@@ -2123,6 +2127,7 @@ class Thermal_Stem(nn.Module):
 class space_to_depth(nn.Module):
     """
         SPD层的辅助类
+        其实应该写成方法的
     """
     def __init__(self):
         super().__init__()
@@ -2167,6 +2172,8 @@ class CBAMFusion(nn.Module):
         self.sp_sigmoid = nn.Sigmoid()
 
     def forward(self, x):# 传入以及拼接好的rgb, thm
+        if isinstance(x, list):
+            x = torch.cat(x, dim=1)
         x = self.reduce_conv(x)# 通道减半，B,c1,h,w
 
         # 通道注意力机制，h*w->1*1
@@ -2200,6 +2207,213 @@ class TransformerFusion(nn.Module):
     """
     pass
 
+
+# 1. Swin 基础工具函数：切分窗口与还原窗口
+def window_partition(x, window_size: int):
+    """将图像张量切分为无重叠的窗口"""
+    B, H, W, C = x.shape
+    x = x.view(B, H // window_size, window_size, W // window_size, window_size, C)
+    windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size * window_size, C)
+    return windows
+
+def window_reverse(windows, window_size: int, H: int, W: int):
+    """将窗口还原为完整的图像张量"""
+    B = int(windows.shape[0] / (H * W / window_size / window_size))
+    x = windows.view(B, H // window_size, W // window_size, window_size, window_size, -1)
+    x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
+    return x
+
+# 2. 阶段一：跨模态对齐块 (Cross-Align Block) - 仅用于第 0 层，不移窗
+class Swin_Cross_Align_Block(nn.Module):
+    """
+    RGB 和 Thermal 保持物理隔离，进行纯粹的双向 Cross-Attention。
+    RGB(Q) 提取 Thermal(V)；Thermal(Q) 提取 RGB(V)。
+    """
+
+    def __init__(self, c1, num_heads=8, window_size=8):
+        super().__init__()
+        self.c1 = c1
+        self.num_heads = num_heads
+        self.window_size = window_size
+        self.scale = (c1 // num_heads) ** -0.5
+
+        # 独立归一化
+        self.norm1_rgb = nn.LayerNorm(c1)
+        self.norm1_thm = nn.LayerNorm(c1)
+
+        # 独立的 QKV 生成器
+        self.qkv_rgb = nn.Linear(c1, c1 * 3, bias=False)
+        self.qkv_thm = nn.Linear(c1, c1 * 3, bias=False)
+
+        # 注意力后的线性投影
+        self.proj_rgb = nn.Linear(c1, c1, bias=False)
+        self.proj_thm = nn.Linear(c1, c1, bias=False)
+
+        # 独立的多层感知机 (MLP)，特征扩展比例为 2
+        self.norm2_rgb = nn.LayerNorm(c1)
+        self.norm2_thm = nn.LayerNorm(c1)
+        self.mlp_rgb = nn.Sequential(nn.Linear(c1, c1 * 2), nn.GELU(), nn.Linear(c1 * 2, c1))
+        self.mlp_thm = nn.Sequential(nn.Linear(c1, c1 * 2), nn.GELU(), nn.Linear(c1 * 2, c1))
+
+    def forward(self, rgb, thm):
+        # 输入格式为 BHWC:[B, H, W, c1]
+        B, H, W, _ = rgb.shape
+        shortcut_rgb, shortcut_thm = rgb, thm
+
+        # Pre-Norm
+        rgb_norm = self.norm1_rgb(rgb)
+        thm_norm = self.norm1_thm(thm)
+
+        # 切窗并展平 ->[B_win, 64, c1]
+        rgb_win = window_partition(rgb_norm, self.window_size)
+        thm_win = window_partition(thm_norm, self.window_size)
+        B_win = rgb_win.shape[0]
+
+        # 产生多头 QKV ->[3, B_win, num_heads, 64, head_dim]
+        qkv_r = self.qkv_rgb(rgb_win).reshape(B_win, -1, 3, self.num_heads, self.c1 // self.num_heads).permute(2, 0,
+                                                                                                               3, 1,
+                                                                                                               4)
+        qkv_t = self.qkv_thm(thm_win).reshape(B_win, -1, 3, self.num_heads, self.c1 // self.num_heads).permute(2, 0,
+                                                                                                               3, 1,
+                                                                                                               4)
+
+        qr, kr, vr = qkv_r[0], qkv_r[1], qkv_r[2]
+        qt, kt, vt = qkv_t[0], qkv_t[1], qkv_t[2]
+
+        # 双向跨模态交叉注意力
+        attn_r2t = (qr @ kt.transpose(-2, -1)) * self.scale  # RGB 查 Thermal
+        attn_t2r = (qt @ kr.transpose(-2, -1)) * self.scale  # Thermal 查 RGB
+
+        # 互换 Value 提取特征，拼接多头
+        out_rgb = (attn_r2t.softmax(dim=-1) @ vt).transpose(1, 2).reshape(B_win, -1, self.c1)
+        out_thm = (attn_t2r.softmax(dim=-1) @ vr).transpose(1, 2).reshape(B_win, -1, self.c1)
+
+        # 线性投影并还原窗口 -> [B, H, W, c1]
+        rgb_res = window_reverse(self.proj_rgb(out_rgb), self.window_size, H, W)
+        thm_res = window_reverse(self.proj_thm(out_thm), self.window_size, H, W)
+
+        # 第一道残差：确立交叉对齐特征
+        rgb = shortcut_rgb + rgb_res
+        thm = shortcut_thm + thm_res
+
+        # 第二道残差：MLP 非线性精修
+        rgb = rgb + self.mlp_rgb(self.norm2_rgb(rgb))
+        thm = thm + self.mlp_thm(self.norm2_thm(thm))
+
+        return rgb, thm
+
+# 3. 阶段二：单流自注意力块 (Self-Reasoning Block) - 用于后续层，支持移窗
+class Swin_Self_Reasoning_Block(nn.Module):
+    """
+    接收融合后的单一张量，进行标准的 Swin 自注意力深度推理。
+    """
+
+    def __init__(self, c1, num_heads=8, window_size=8, shift=False):
+        super().__init__()
+        self.c1 = c1
+        self.num_heads = num_heads
+        self.window_size = window_size
+        self.shift_size = window_size // 2 if shift else 0
+        self.scale = (c1 // num_heads) ** -0.5
+
+        self.norm1 = nn.LayerNorm(c1)
+        self.qkv = nn.Linear(c1, c1 * 3, bias=False)
+        self.proj = nn.Linear(c1, c1, bias=False)
+
+        self.norm2 = nn.LayerNorm(c1)
+        self.mlp = nn.Sequential(nn.Linear(c1, c1 * 2), nn.GELU(), nn.Linear(c1 * 2, c1))
+
+    def forward(self, x):
+        # 输入格式为 BHWC: [B, H, W, c1]
+        B, H, W, _ = x.shape
+        shortcut = x
+
+        x = self.norm1(x)
+
+        # 移窗 (Shift)
+        if self.shift_size > 0:
+            x = torch.roll(x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2))
+
+        # 切窗并展平
+        x_win = window_partition(x, self.window_size)
+        B_win = x_win.shape[0]
+
+        # QKV 自注意力
+        qkv = self.qkv(x_win).reshape(B_win, -1, 3, self.num_heads, self.c1 // self.num_heads).permute(2, 0, 3, 1,
+                                                                                                       4)
+        q, k, v = qkv[0], qkv[1], qkv[2]
+
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        out = (attn.softmax(dim=-1) @ v).transpose(1, 2).reshape(B_win, -1, self.c1)
+
+        # 还原窗口
+        x_res = window_reverse(self.proj(out), self.window_size, H, W)
+
+        # 逆向移窗 (Reverse Shift)
+        if self.shift_size > 0:
+            x_res = torch.roll(x_res, shifts=(self.shift_size, self.shift_size), dims=(1, 2))
+
+        # 残差与 MLP
+        x = shortcut + x_res
+        x = x + self.mlp(self.norm2(x))
+
+        return x
+
+# 4. 顶层管理：YOLO 直接调用的融合大一统容器
 class Swin_Transformer_Fusion(nn.Module):
-    pass
+    """
+    RGBT 完美融合流水线：先交叉对齐 (Cross)，合二为一，后深度推理 (Self)。
+    YAML 调用方式: [[7, 17], 1, Swin_Transformer_Fusion,[512, 8, 4, 8]]
+    参数: [输出通道c1, 头数, 总深度, 窗口大小]
+    """
+
+    def __init__(self, c1, num_heads=8, depth=4, window_size=8):
+        super().__init__()
+
+        # 1. 跨模态对齐阶段 (第 0 层，不移窗)
+        self.cross_align = Swin_Cross_Align_Block(c1, num_heads, window_size)
+
+        # 2. 降维合并枢纽 (使用 mlp 将 2*c1 变为 c1，因为当前是 BHWC 格式)
+        self.fusion_bridge = nn.Sequential(
+            nn.LayerNorm(c1 * 2),
+            nn.Linear(c1 * 2, c1 * 2, bias=False),
+            nn.GELU(),
+            nn.Linear(c1 * 2, c1, bias=False),
+            nn.LayerNorm(c1)
+        )
+
+        # 3. 单流深度推理阶段 (第 1 到 depth-1 层，交替移窗)
+        self.self_reasoning = nn.ModuleList()
+        for i in range(1, depth):
+            # 因为第 0 层没移窗，所以第 1 层开启移窗，后续交替
+            shift_opt = (i % 2 != 0)
+            self.self_reasoning.append(
+                Swin_Self_Reasoning_Block(c1, num_heads, window_size, shift=shift_opt)
+            )
+
+    def forward(self, x):
+        # 预处理：解析输入并转为 Transformer 需要的 BHWC
+        if isinstance(x, list):
+            rgb = x[0].permute(0, 2, 3, 1).contiguous()
+            thm = x[1].permute(0, 2, 3, 1).contiguous()
+        else:
+            # 如果是 Concat 层传进来的单张量 [B, c1*2, H, W]
+            x = x.permute(0, 2, 3, 1).contiguous()
+            c1 = x.shape[-1] // 2
+            rgb = x[..., :c1]
+            thm = x[..., c1:]
+
+        # Stage 1: 跨模态握手 (双向交互特征对齐)
+        rgb, thm = self.cross_align(rgb, thm)
+
+        # Stage 2: 降维融合 (拼接后送入 mlp 降维)
+        fused = torch.cat([rgb, thm], dim=-1)  # [B, H, W, c1*2]
+        fused = self.fusion_bridge(fused)  # [B, H, W, c1]
+
+        # Stage 3: 深度上下文推理 (Shift 循环)
+        for layer in self.self_reasoning:
+            fused = layer(fused)
+
+        # 终点：换回 YOLO 架构所需的 BCHW 格式
+        return fused.permute(0, 3, 1, 2).contiguous()
 
