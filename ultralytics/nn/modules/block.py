@@ -59,6 +59,7 @@ __all__ = (
     "SPDConv",
     "CBAMFusion",
     "TransformerFusion",
+    "Swin_Transformer_Fusion",
 )
 
 
@@ -2160,7 +2161,7 @@ class CBAMFusion(nn.Module):
         )
         self.ch_sigmoid = nn.Sigmoid()
 
-        self.conv1 = nn.Conv2d(2, 1, 7, 1 ,padding=3)
+        self.conv1 = nn.Conv2d(2, 1, 7, 1 ,padding=3)# 7*7卷积核论文证明
         self.ch_avg = nn.AdaptiveAvgPool2d((1, 1))
         self.ch_max = nn.AdaptiveMaxPool2d((1, 1))
         self.sp_sigmoid = nn.Sigmoid()
@@ -2194,4 +2195,11 @@ class CBAMFusion(nn.Module):
 
 
 class TransformerFusion(nn.Module):
+    """
+    - [[7, 17], 1, TransformerFusion, [512, 8]]
+    """
     pass
+
+class Swin_Transformer_Fusion(nn.Module):
+    pass
+

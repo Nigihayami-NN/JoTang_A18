@@ -77,7 +77,8 @@ from ultralytics.nn.modules import (
     Thermal_Stem,
     SPDConv,
     CBAMFusion,
-    TransformerFusion
+    TransformerFusion,
+    Swin_Transformer_Fusion,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, LOGGER, YAML, colorstr, emojis
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -1611,6 +1612,7 @@ def parse_model(d, ch, verbose=True):
             SPDConv,
             CBAMFusion,
             TransformerFusion,
+            Swin_Transformer_Fusion,
             RGB_Stem,
             Thermal_Stem,
         }

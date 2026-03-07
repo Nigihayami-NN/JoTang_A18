@@ -59,6 +59,13 @@ from .block import (
     ResNetLayer,
     SCDown,
     TorchVision,
+    PassThrough,
+    SPDConv,
+    CBAMFusion,
+    TransformerFusion,
+    Swin_Transformer_Fusion,
+    RGB_Stem,
+    Thermal_Stem,
 )
 from .conv import (
     CBAM,
@@ -187,4 +194,11 @@ __all__ = (
     "YOLOESegment",
     "YOLOESegment26",
     "v10Detect",
+    "PassThrough",
+    "RGB_Stem",
+    "Thermal_Stem",
+    "SPDConv",
+    "CBAMFusion",
+    "TransformerFusion",
+    "Swin_Transformer_Fusion",
 )
