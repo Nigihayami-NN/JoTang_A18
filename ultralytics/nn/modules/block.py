@@ -2087,40 +2087,76 @@ class PassThrough(nn.Module):
     零计算量的数据截留层, 使得后面的层可以拿到数据。
     接收输入张量，原封不动地返回。
     """
-    def __init__(self, c1, c2):
+    def __init__(self, *args, **kwargs):
         super().__init__()
         pass
     def forward(self, images):
         return images
 
+# class RGB_Stem(nn.Module):
+#     """
+#     RGB 支路的入口层。
+#     负责从 4 通道三明治中剥离前 3 个通道，并进行初始卷积。
+#     """
+#     def __init__(self, c1, c2, k=3, s=2):
+#         super().__init__()
+#         self.conv = Conv(3, c2, k, s)
+#         """
+#         卷积 1024x1024 -> 512x512. yolo26x，64 * 1.5 = 96 通道
+#         """
+#
+#     def forward(self, images):# batchsize, channel=4, h, w
+#         rgb_img = images[:,0:3,:,:]
+#         rgb_img = self.conv(rgb_img)
+#         return rgb_img #batchsize, channel=3, h, w
+
+
 class RGB_Stem(nn.Module):
-    """
-    RGB 支路的入口层。
-    负责从 4 通道三明治中剥离前 3 个通道，并进行初始卷积。
-    """
     def __init__(self, c1, c2, k=3, s=2):
         super().__init__()
         self.conv = Conv(3, c2, k, s)
-        """
-        卷积 1024x1024 -> 512x512. yolo26x，64 * 1.5 = 96 通道
-        """
 
-    def forward(self, images):# batchsize, channel=4, h, w
-        rgb_img = images[:,0:3,:,:]
-        rgb_img = self.conv(rgb_img)
-        return rgb_img #batchsize, channel=3, h, w
+    def forward(self, images):
+        # 确保只取前三个通道（如果 dummy 是 3 通道就全取，4 通道就取前 3）
+        channels = min(images.shape[1], 3)
+        rgb_img = images[:, :channels, :, :]
+
+        # 万一连 3 通道都没有（极端情况）
+        if channels < 3:
+            # 这部分通常不会触发
+            rgb_img = torch.cat([rgb_img] * (3 // channels), dim=1)
+
+        return self.conv(rgb_img)
+
+# class Thermal_Stem(nn.Module):
+#     """
+#        Thermal 支路的入口层。
+#        负责提取第 4 个通道，并进行初始卷积。
+#     """
+#     def __init__(self, c1, c2, k=3, s=2):
+#         super().__init__()
+#         self.conv = Conv(1, c2, k, s)
+#
+#     def forward(self, images):
+#         thm_img = images[:,3:4,:,:]
+#         thm_img = self.conv(thm_img)
+#         return thm_img
 
 class Thermal_Stem(nn.Module):
-    """
-       Thermal 支路的入口层。
-       负责提取第 4 个通道，并进行初始卷积。
-    """
     def __init__(self, c1, c2, k=3, s=2):
         super().__init__()
         self.conv = Conv(1, c2, k, s)
 
     def forward(self, images):
-        thm_img = images[:,3:4,:,:]
+        # 增加对（3通道）的兼容
+        # 如果输入的通道数不够 4 个（说明是框架在做初始化测试）
+        if images.shape[1] < 4:
+            # 强行拿第 0 个通道来模拟红外通道，防止切片出空集导致崩溃
+            thm_img = images[:, 0:1, :, :]
+        else:
+            # 正常训练/推理时，读取真正的第 4 通道
+            thm_img = images[:, 3:4, :, :]
+
         thm_img = self.conv(thm_img)
         return thm_img
 
@@ -2209,19 +2245,64 @@ class TransformerFusion(nn.Module):
 
 
 # 1. Swin 基础工具函数：切分窗口与还原窗口
+# def window_partition(x, window_size: int):
+#     """将图像张量切分为无重叠的窗口"""
+#     B, H, W, C = x.shape
+#     x = x.view(B, H // window_size, window_size, W // window_size, window_size, C)
+#     windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size * window_size, C)
+#     return windows
+#
+# def window_reverse(windows, window_size: int, H: int, W: int):
+#     """将窗口还原为完整的图像张量"""
+#     B = int(windows.shape[0] / (H * W / window_size / window_size))
+#     x = windows.view(B, H // window_size, W // window_size, window_size, window_size, -1)
+#     x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
+#     return x
+
+
 def window_partition(x, window_size: int):
-    """将图像张量切分为无重叠的窗口"""
+    """
+    支持自动 Padding 的切窗方法。
+    x: (B, H, W, C)
+    """
     B, H, W, C = x.shape
-    x = x.view(B, H // window_size, window_size, W // window_size, window_size, C)
+
+    # 1. 计算需要填充的量，确保 H 和 W 能被 window_size 整除
+    pad_h = (window_size - H % window_size) % window_size
+    pad_w = (window_size - W % window_size) % window_size
+
+    if pad_h > 0 or pad_w > 0:
+        # 在 H 和 W 维度补零 [左, 右, 上, 下] -> [0, pad_w, 0, pad_h]
+        x = F.pad(x, (0, 0, 0, pad_w, 0, pad_h))
+
+    _, Hp, Wp, _ = x.shape
+
+    # 2. 现在可以安全地进行 view 操作了
+    x = x.view(B, Hp // window_size, window_size, Wp // window_size, window_size, C)
     windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size * window_size, C)
     return windows
 
+
 def window_reverse(windows, window_size: int, H: int, W: int):
-    """将窗口还原为完整的图像张量"""
-    B = int(windows.shape[0] / (H * W / window_size / window_size))
-    x = windows.view(B, H // window_size, W // window_size, window_size, window_size, -1)
-    x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
+    """
+    支持自动裁剪（Un-padding）的还原方法。
+    H, W 是原始的图像尺寸。
+    """
+    # 1. 计算填充后的目标尺寸
+    Hp = (H + window_size - 1) // window_size * window_size
+    Wp = (W + window_size - 1) // window_size * window_size
+
+    B = int(windows.shape[0] / (Hp * Wp / window_size / window_size))
+
+    # 2. 还原成填充后的尺寸
+    x = windows.view(B, Hp // window_size, Wp // window_size, window_size, window_size, -1)
+    x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, Hp, Wp, -1)
+
+    # 3. 裁剪掉刚才填充的零，恢复到原始的 H, W
+    if Hp > H or Wp > W:
+        x = x[:, :H, :W, :].contiguous()
     return x
+
 
 # 2. 阶段一：跨模态对齐块 (Cross-Align Block) - 仅用于第 0 层，不移窗
 class Swin_Cross_Align_Block(nn.Module):

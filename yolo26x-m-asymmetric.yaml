@@ -1,7 +1,8 @@
 # YOLO26x-M Asymmetric Dual-Stream (RGB: X-Heavy, Thermal: M-Light)
 # With P2 Head, SPD-Conv, and Transformer Fusion
 
-nc: 10
+#names: [car, truck, bus, motorcycle, pedestrian, pickup, tractor, camping_car, boat, plane, other]
+nc: 11
 ch: 4
 
 scales:
@@ -9,7 +10,7 @@ scales:
 
 backbone:
   # 0: 数据分发站 (截留原始 4 通道)
-  - [-1, 1, PassThrough, [4]]
+  - [-1, 1, PassThrough, []]
 
   # ==========================================
   # 分支 A：RGB 主干 (完全对标 YOLO26x，深度为 2)
