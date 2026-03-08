@@ -1,0 +1,18 @@
+# parent
+# ├── ultralytics
+# └── datasets
+#     └── CustomDataSet
+#            |_Images
+#            |_Labels
+            
+path: CustomDataSet # dataset root dir
+train: Images/train # train images (relative to 'path')
+val: Images/val # val images (relative to 'path') 
+test: Images/test # test images (relative to 'path') 
+
+# Classes类别，你们看看.txt中的编号分别对应什么，填完：
+names:
+  0: 
+  1: 
+  2: 
+  3: 
