@@ -146,6 +146,36 @@ def bbox_iou(
         return iou - (c_area - union) / c_area  # GIoU https://arxiv.org/pdf/1902.09630.pdf
     return iou  # IoU
 
+def bbox_nwd(pred_bboxes: torch.Tensor, target_bboxes: torch.Tensor, constant: float = 12.8) -> torch.Tensor:
+    """Compute Normalized Wasserstein Distance (NWD) similarity for axis-aligned boxes in xyxy format."""
+    eps = 1e-7
+     # 优化点 1: 使用 unbind 解包替代 xyxy2xywh，省去新 Tensor 拼接的显存和时间开销
+    p_x1, p_y1, p_x2, p_y2 = pred_bboxes.unbind(dim=-1)
+    t_x1, t_y1, t_x2, t_y2 = target_bboxes.unbind(dim=-1)
+
+    # 计算中心点坐标
+    p_cx, p_cy = (p_x1 + p_x2) / 2.0, (p_y1 + p_y2) / 2.0
+    t_cx, t_cy = (t_x1 + t_x2) / 2.0, (t_y1 + t_y2) / 2.0
+    
+    # 计算宽高
+    p_w, p_h = p_x2 - p_x1, p_y2 - p_y1
+    t_w, t_h = t_x2 - t_x1, t_y2 - t_y1
+
+    # 1. 中心点欧氏距离平方
+    center_dist2 = (p_cx - t_cx).pow(2) + (p_cy - t_cy).pow(2)
+
+    # 2. 宽高(协方差)距离平方 / 4
+    wh_dist2 = ((p_w - t_w).pow(2) + (p_h - t_h).pow(2)) / 4.0
+
+    # 3. 计算 Wasserstein_2 距离的平方
+    wasserstein_2 = center_dist2 + wh_dist2
+
+    # 4. 计算 NWD 相似度
+    # 优化点 2: eps 严格放在 sqrt 内部防梯度爆炸
+    wasserstein_dist = torch.sqrt(wasserstein_2 + eps)
+    nwd = torch.exp(-wasserstein_dist / constant)
+    
+    return nwd
 
 def mask_iou(mask1: torch.Tensor, mask2: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
     """Calculate masks IoU.
