@@ -1610,9 +1610,6 @@ def parse_model(d, ch, verbose=True):
             C2fCIB,
             A2C2f,
             SPDConv,
-            CBAMFusion,
-            TransformerFusion,
-            Swin_Transformer_Fusion,
             RGB_Stem,
             Thermal_Stem,
         }
@@ -1686,6 +1683,14 @@ def parse_model(d, ch, verbose=True):
             args = [ch[f]]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
+
+        elif m.__name__ in {"CBAMFusion", "Swin_Transformer_Fusion"}:
+            c2 = args[0]
+            if c2 != nc:
+                c2 = make_divisible(c2 * width, 8)
+            args = [c2, *args[1:]]
+        # ===================================
+
         elif m in frozenset(
             {
                 Detect,
