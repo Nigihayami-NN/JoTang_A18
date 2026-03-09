@@ -1,11 +1,10 @@
-# parent
+# JoTang_A18
 # ├── ultralytics
-# └── datasets
-#     └── CustomDataSet
-#            |_Images
-#            |_Labels
+# └──CustomDataSet
+#        |-Images
+#        |-Labels
             
-path: CustomDataSet # dataset root dir
+path: ./CustomDataSet # dataset root dir
 train: Images/train # train images (relative to 'path')
 val: Images/val # val images (relative to 'path') 
 test: Images/test # test images (relative to 'path') 

@@ -117,7 +117,7 @@ class BaseDataset(Dataset):
         self.im_files = self.get_img_files(self.img_path)
         self.labels = self.get_labels()
         self.update_labels(include_class=classes)  # single_cls and include_class
-        self.ni = len(self.labels)  # number of images
+        self.ni = len(self.labels)//2  # number of images
         self.rect = rect
         self.batch_size = batch_size
         self.stride = stride
@@ -208,14 +208,14 @@ class BaseDataset(Dataset):
                 self.labels[i]["cls"][:, 0] = 0
 
     def load_image(self, i: int, rect_mode: bool = True) -> tuple[np.ndarray, tuple[int, int], tuple[int, int]]:
-        """Load an image from dataset index 'i'.
+        """Load an image from dataset index 'i', combining RGB (2i, 3通道) and thermal (2i+1, 1通道) images.
 
         Args:
-            i (int): Index of the image to load.
+            i (int): Index of the image pair to load (loads images 2i and 2i+1).
             rect_mode (bool): Whether to use rectangular resizing.
 
         Returns:
-            im (np.ndarray): Loaded image as a NumPy array.
+            im (np.ndarray): Loaded combined image as a NumPy array (4 channels: RGB + Thermal).
             hw_original (tuple[int, int]): Original image dimensions in (height, width) format.
             hw_resized (tuple[int, int]): Resized image dimensions in (height, width) format.
 
@@ -224,28 +224,81 @@ class BaseDataset(Dataset):
         """
         im, f, fn = self.ims[i], self.im_files[i], self.npy_files[i]
         if im is None:  # not cached in RAM
-            if fn.exists():  # load npy
+            # Calculate indices for RGB (2i) and thermal (2i+1) images
+            idx_rgb = 2 * i
+            idx_thermal = 2 * i + 1
+            
+            # Check if indices are valid
+            if idx_rgb >= len(self.im_files) or idx_thermal >= len(self.im_files):
+                raise IndexError(f"Image pair index {i} (RGB: {idx_rgb}, Thermal: {idx_thermal}) out of range "
+                            f"for dataset with {len(self.im_files)} images")
+            
+            # Get file paths for both images
+            f_rgb = self.im_files[idx_rgb]
+            f_thermal = self.im_files[idx_thermal]
+            fn_rgb = self.npy_files[idx_rgb]
+            fn_thermal = self.npy_files[idx_thermal]
+            
+            # Load RGB image (2i) - 3 channels
+            if fn_rgb.exists():  # load npy
                 try:
-                    im = np.load(fn)
+                    im_rgb = np.load(fn_rgb)
                 except Exception as e:
-                    LOGGER.warning(f"{self.prefix}Removing corrupt *.npy image file {fn} due to: {e}")
-                    Path(fn).unlink(missing_ok=True)
-                    im = imread(f, flags=self.cv2_flag)  # BGR
+                    LOGGER.warning(f"{self.prefix}Removing corrupt *.npy image file {fn_rgb} due to: {e}")
+                    Path(fn_rgb).unlink(missing_ok=True)
+                    im_rgb = imread(f_rgb, flags=self.cv2_flag)  # BGR by default in OpenCV
             else:  # read image
-                im = imread(f, flags=self.cv2_flag)  # BGR
-            if im is None:
-                raise FileNotFoundError(f"Image Not Found {f}")
-
-            h0, w0 = im.shape[:2]  # orig hw
+                im_rgb = imread(f_rgb, flags=self.cv2_flag)  # BGR by default in OpenCV
+            
+            if im_rgb is None:
+                raise FileNotFoundError(f"RGB Image Not Found {f_rgb}")
+            
+            # Ensure RGB image has 3 channels
+            if im_rgb.ndim == 2:
+                im_rgb = cv2.cvtColor(im_rgb, cv2.COLOR_GRAY2BGR)  # Convert grayscale to 3-channel BGR
+            elif im_rgb.shape[2] == 4:
+                im_rgb = im_rgb[:, :, :3]  # Remove alpha channel if present
+            
+            # Load thermal image (2i+1) - 1 channel
+            if fn_thermal.exists():  # load npy
+                try:
+                    im_thermal = np.load(fn_thermal)
+                except Exception as e:
+                    LOGGER.warning(f"{self.prefix}Removing corrupt *.npy image file {fn_thermal} due to: {e}")
+                    Path(fn_thermal).unlink(missing_ok=True)
+                    im_thermal = imread(f_thermal, flags=cv2.IMREAD_GRAYSCALE)  # Force grayscale
+            else:  # read image
+                im_thermal = imread(f_thermal, flags=cv2.IMREAD_GRAYSCALE)  # Force grayscale
+            
+            if im_thermal is None:
+                raise FileNotFoundError(f"Thermal Image Not Found {f_thermal}")
+            
+            # Ensure thermal image is single channel
+            if im_thermal.ndim == 3:
+                im_thermal = cv2.cvtColor(im_thermal, cv2.COLOR_BGR2GRAY)  # Convert to grayscale if needed
+            
+            # Ensure both images have the same spatial dimensions
+            if im_rgb.shape[:2] != im_thermal.shape[:2]:
+                raise ValueError(f"Shape mismatch: RGB image {f_rgb} has shape {im_rgb.shape[:2]}, "
+                            f"but thermal image {f_thermal} has shape {im_thermal.shape[:2]}")
+            
+            # Add channel dimension to thermal if needed (H,W) -> (H,W,1)
+            im_thermal = im_thermal[..., None]
+            
+            # Concatenate along channel dimension: RGB (3) + Thermal (1) = 4 channels
+            im = np.concatenate([im_rgb, im_thermal], axis=-1)  # Result: (H, W, 4)
+            
+            h0, w0 = im_rgb.shape[:2]  # orig hw (both images have same size)
+            
+            # Resize logic (applied to the concatenated 4-channel image)
             if rect_mode:  # resize long side to imgsz while maintaining aspect ratio
                 r = self.imgsz / max(h0, w0)  # ratio
                 if r != 1:  # if sizes are not equal
                     w, h = (min(math.ceil(w0 * r), self.imgsz), min(math.ceil(h0 * r), self.imgsz))
+                    # cv2.resize supports multi-channel, but ensure interpolation is appropriate
                     im = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
             elif not (h0 == w0 == self.imgsz):  # resize by stretching image to square imgsz
                 im = cv2.resize(im, (self.imgsz, self.imgsz), interpolation=cv2.INTER_LINEAR)
-            if im.ndim == 2:
-                im = im[..., None]
 
             # Add to buffer if training with augmentations
             if self.augment:
