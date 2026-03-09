@@ -79,6 +79,7 @@ from ultralytics.nn.modules import (
     CBAMFusion,
     TransformerFusion,
     Swin_Transformer_Fusion,
+    PyramidShuffleLevel
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, LOGGER, YAML, colorstr, emojis
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -1684,12 +1685,46 @@ def parse_model(d, ch, verbose=True):
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
 
+            # === 你的竞赛模块专属拦截区 (请精确复制这段) ===
+
+        elif m.__name__ == "PyramidShuffleLevel":
+
+            # YAML 中的格式: [[22, 23, 24], 1, PyramidShuffleLevel, [目标索引0/1/2, 输出通道256]]
+
+            # 此时 args = [0, 256]
+
+            level_idx = args[0]
+
+            c2_raw = args[1]
+
+            # 1. 自动执行 1.25 倍宽度缩放
+
+            c2 = make_divisible(c2_raw * width, 8)
+
+            # 2. 提取输入列表 [ch[22], ch[23], ch[24]] 的实际通道
+
+            c1_list = [ch[x] for x in f]
+
+            # 3. 【核心修正】：打包 3 个参数给 __init__ (self除外)
+
+            # 这三个参数将作为 (c1_list, c2, level_idx) 传给 block.py
+
+            args = [c1_list, c2, level_idx]
+
+
         elif m.__name__ in {"CBAMFusion", "Swin_Transformer_Fusion"}:
+
             c2 = args[0]
+
             if c2 != nc:
                 c2 = make_divisible(c2 * width, 8)
+
             args = [c2, *args[1:]]
-        # ===================================
+
+
+        # ============================================
+
+
 
         elif m in frozenset(
             {
