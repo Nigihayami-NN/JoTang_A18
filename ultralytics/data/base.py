@@ -114,10 +114,33 @@ class BaseDataset(Dataset):
         self.fraction = fraction
         self.channels = channels
         self.cv2_flag = cv2.IMREAD_GRAYSCALE if channels == 1 else cv2.IMREAD_COLOR
+        # self.im_files = self.get_img_files(self.img_path)
+        # self.labels = self.get_labels()
+        # self.update_labels(include_class=classes)  # single_cls and include_class
+        # self.ni = len(self.labels)//2  # number of images
+
+
+        # 【核心修正】：如果文件夹里 RGB 和红外混放，我们只保留一半的文件索引
+        # 这样 ni 和后续所有的计算（bi, ar）才能对齐
+        # --- 1. 先获取所有文件路径 ---
         self.im_files = self.get_img_files(self.img_path)
-        self.labels = self.get_labels()
-        self.update_labels(include_class=classes)  # single_cls and include_class
-        self.ni = len(self.labels)//2  # number of images
+
+        # --- 2. 获取原始所有标签 (此时包含 RGB 和 IR) ---
+        # 注意：get_labels() 只返回列表，不会自动赋值给 self.labels
+        all_labels = self.get_labels()
+
+        # --- 3. 【关键：必须先赋值】 ---
+        # 执行切片，只留 RGB 的路径和标签，并正式定义 self.labels 属性
+        self.im_files = self.im_files[::2]
+        self.labels = all_labels[::2]  # <--- 先执行这一步，定义 labels 属性
+
+        # --- 4. 现在 self.labels 存在了，可以安全地调用更新函数了 ---
+        self.update_labels(include_class=classes)
+
+        # --- 5. 最后更新图片计数 ---
+        self.ni = len(self.labels)
+        # -----------------------
+
         self.rect = rect
         self.batch_size = batch_size
         self.stride = stride
@@ -207,111 +230,176 @@ class BaseDataset(Dataset):
             if self.single_cls:
                 self.labels[i]["cls"][:, 0] = 0
 
+    # def load_image(self, i: int, rect_mode: bool = True) -> tuple[np.ndarray, tuple[int, int], tuple[int, int]]:
+    #     """Load an image from dataset index 'i', combining RGB (2i, 3通道) and thermal (2i+1, 1通道) images.
+    #
+    #     Args:
+    #         i (int): Index of the image pair to load (loads images 2i and 2i+1).
+    #         rect_mode (bool): Whether to use rectangular resizing.
+    #
+    #     Returns:
+    #         im (np.ndarray): Loaded combined image as a NumPy array (4 channels: RGB + Thermal).
+    #         hw_original (tuple[int, int]): Original image dimensions in (height, width) format.
+    #         hw_resized (tuple[int, int]): Resized image dimensions in (height, width) format.
+    #
+    #     Raises:
+    #         FileNotFoundError: If the image file is not found.
+    #     """
+    #     im, f, fn = self.ims[i], self.im_files[i], self.npy_files[i]
+    #     if im is None:  # not cached in RAM
+    #         # Calculate indices for RGB (2i) and thermal (2i+1) images
+    #         idx_rgb = 2 * i
+    #         idx_thermal = 2 * i + 1
+    #
+    #         # Check if indices are valid
+    #         if idx_rgb >= len(self.im_files) or idx_thermal >= len(self.im_files):
+    #             raise IndexError(f"Image pair index {i} (RGB: {idx_rgb}, Thermal: {idx_thermal}) out of range "
+    #                         f"for dataset with {len(self.im_files)} images")
+    #
+    #         # Get file paths for both images
+    #         f_rgb = self.im_files[idx_rgb]
+    #         f_thermal = self.im_files[idx_thermal]
+    #         fn_rgb = self.npy_files[idx_rgb]
+    #         fn_thermal = self.npy_files[idx_thermal]
+    #
+    #         # Load RGB image (2i) - 3 channels
+    #         if fn_rgb.exists():  # load npy
+    #             try:
+    #                 im_rgb = np.load(fn_rgb)
+    #             except Exception as e:
+    #                 LOGGER.warning(f"{self.prefix}Removing corrupt *.npy image file {fn_rgb} due to: {e}")
+    #                 Path(fn_rgb).unlink(missing_ok=True)
+    #                 im_rgb = imread(f_rgb, flags=self.cv2_flag)  # BGR by default in OpenCV
+    #         else:  # read image
+    #             im_rgb = imread(f_rgb, flags=self.cv2_flag)  # BGR by default in OpenCV
+    #
+    #         if im_rgb is None:
+    #             raise FileNotFoundError(f"RGB Image Not Found {f_rgb}")
+    #
+    #         # Ensure RGB image has 3 channels
+    #         if im_rgb.ndim == 2:
+    #             im_rgb = cv2.cvtColor(im_rgb, cv2.COLOR_GRAY2BGR)  # Convert grayscale to 3-channel BGR
+    #         elif im_rgb.shape[2] == 4:
+    #             im_rgb = im_rgb[:, :, :3]  # Remove alpha channel if present
+    #
+    #         # Load thermal image (2i+1) - 1 channel
+    #         if fn_thermal.exists():  # load npy
+    #             try:
+    #                 im_thermal = np.load(fn_thermal)
+    #             except Exception as e:
+    #                 LOGGER.warning(f"{self.prefix}Removing corrupt *.npy image file {fn_thermal} due to: {e}")
+    #                 Path(fn_thermal).unlink(missing_ok=True)
+    #                 im_thermal = imread(f_thermal, flags=cv2.IMREAD_GRAYSCALE)  # Force grayscale
+    #         else:  # read image
+    #             im_thermal = imread(f_thermal, flags=cv2.IMREAD_GRAYSCALE)  # Force grayscale
+    #
+    #         if im_thermal is None:
+    #             raise FileNotFoundError(f"Thermal Image Not Found {f_thermal}")
+    #
+    #         # Ensure thermal image is single channel
+    #         if im_thermal.ndim == 3:
+    #             im_thermal = cv2.cvtColor(im_thermal, cv2.COLOR_BGR2GRAY)  # Convert to grayscale if needed
+    #
+    #         # Ensure both images have the same spatial dimensions
+    #         if im_rgb.shape[:2] != im_thermal.shape[:2]:
+    #             raise ValueError(f"Shape mismatch: RGB image {f_rgb} has shape {im_rgb.shape[:2]}, "
+    #                         f"but thermal image {f_thermal} has shape {im_thermal.shape[:2]}")
+    #
+    #         # Add channel dimension to thermal if needed (H,W) -> (H,W,1)
+    #         im_thermal = im_thermal[..., None]
+    #
+    #         # Concatenate along channel dimension: RGB (3) + Thermal (1) = 4 channels
+    #         im = np.concatenate([im_rgb, im_thermal], axis=-1)  # Result: (H, W, 4)
+    #
+    #         h0, w0 = im_rgb.shape[:2]  # orig hw (both images have same size)
+    #
+    #         # Resize logic (applied to the concatenated 4-channel image)
+    #         if rect_mode:  # resize long side to imgsz while maintaining aspect ratio
+    #             r = self.imgsz / max(h0, w0)  # ratio
+    #             if r != 1:  # if sizes are not equal
+    #                 w, h = (min(math.ceil(w0 * r), self.imgsz), min(math.ceil(h0 * r), self.imgsz))
+    #                 # cv2.resize supports multi-channel, but ensure interpolation is appropriate
+    #                 im = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
+    #         elif not (h0 == w0 == self.imgsz):  # resize by stretching image to square imgsz
+    #             im = cv2.resize(im, (self.imgsz, self.imgsz), interpolation=cv2.INTER_LINEAR)
+    #
+    #         # Add to buffer if training with augmentations
+    #         if self.augment:
+    #             self.ims[i], self.im_hw0[i], self.im_hw[i] = im, (h0, w0), im.shape[:2]  # im, hw_original, hw_resized
+    #             self.buffer.append(i)
+    #             if 1 < len(self.buffer) >= self.max_buffer_length:  # prevent empty buffer
+    #                 j = self.buffer.pop(0)
+    #                 if self.cache != "ram":
+    #                     self.ims[j], self.im_hw0[j], self.im_hw[j] = None, None, None
+    #
+    #         return im, (h0, w0), im.shape[:2]
+    #
+    #     return self.ims[i], self.im_hw0[i], self.im_hw[i]
+
     def load_image(self, i: int, rect_mode: bool = True) -> tuple[np.ndarray, tuple[int, int], tuple[int, int]]:
-        """Load an image from dataset index 'i', combining RGB (2i, 3通道) and thermal (2i+1, 1通道) images.
-
-        Args:
-            i (int): Index of the image pair to load (loads images 2i and 2i+1).
-            rect_mode (bool): Whether to use rectangular resizing.
-
-        Returns:
-            im (np.ndarray): Loaded combined image as a NumPy array (4 channels: RGB + Thermal).
-            hw_original (tuple[int, int]): Original image dimensions in (height, width) format.
-            hw_resized (tuple[int, int]): Resized image dimensions in (height, width) format.
-
-        Raises:
-            FileNotFoundError: If the image file is not found.
         """
-        im, f, fn = self.ims[i], self.im_files[i], self.npy_files[i]
-        if im is None:  # not cached in RAM
-            # Calculate indices for RGB (2i) and thermal (2i+1) images
-            idx_rgb = 2 * i
-            idx_thermal = 2 * i + 1
-            
-            # Check if indices are valid
-            if idx_rgb >= len(self.im_files) or idx_thermal >= len(self.im_files):
-                raise IndexError(f"Image pair index {i} (RGB: {idx_rgb}, Thermal: {idx_thermal}) out of range "
-                            f"for dataset with {len(self.im_files)} images")
-            
-            # Get file paths for both images
-            f_rgb = self.im_files[idx_rgb]
-            f_thermal = self.im_files[idx_thermal]
-            fn_rgb = self.npy_files[idx_rgb]
-            fn_thermal = self.npy_files[idx_thermal]
-            
-            # Load RGB image (2i) - 3 channels
-            if fn_rgb.exists():  # load npy
-                try:
-                    im_rgb = np.load(fn_rgb)
-                except Exception as e:
-                    LOGGER.warning(f"{self.prefix}Removing corrupt *.npy image file {fn_rgb} due to: {e}")
-                    Path(fn_rgb).unlink(missing_ok=True)
-                    im_rgb = imread(f_rgb, flags=self.cv2_flag)  # BGR by default in OpenCV
-            else:  # read image
-                im_rgb = imread(f_rgb, flags=self.cv2_flag)  # BGR by default in OpenCV
-            
-            if im_rgb is None:
-                raise FileNotFoundError(f"RGB Image Not Found {f_rgb}")
-            
-            # Ensure RGB image has 3 channels
-            if im_rgb.ndim == 2:
-                im_rgb = cv2.cvtColor(im_rgb, cv2.COLOR_GRAY2BGR)  # Convert grayscale to 3-channel BGR
-            elif im_rgb.shape[2] == 4:
-                im_rgb = im_rgb[:, :, :3]  # Remove alpha channel if present
-            
-            # Load thermal image (2i+1) - 1 channel
-            if fn_thermal.exists():  # load npy
-                try:
-                    im_thermal = np.load(fn_thermal)
-                except Exception as e:
-                    LOGGER.warning(f"{self.prefix}Removing corrupt *.npy image file {fn_thermal} due to: {e}")
-                    Path(fn_thermal).unlink(missing_ok=True)
-                    im_thermal = imread(f_thermal, flags=cv2.IMREAD_GRAYSCALE)  # Force grayscale
-            else:  # read image
-                im_thermal = imread(f_thermal, flags=cv2.IMREAD_GRAYSCALE)  # Force grayscale
-            
-            if im_thermal is None:
-                raise FileNotFoundError(f"Thermal Image Not Found {f_thermal}")
-            
-            # Ensure thermal image is single channel
-            if im_thermal.ndim == 3:
-                im_thermal = cv2.cvtColor(im_thermal, cv2.COLOR_BGR2GRAY)  # Convert to grayscale if needed
-            
-            # Ensure both images have the same spatial dimensions
-            if im_rgb.shape[:2] != im_thermal.shape[:2]:
-                raise ValueError(f"Shape mismatch: RGB image {f_rgb} has shape {im_rgb.shape[:2]}, "
-                            f"but thermal image {f_thermal} has shape {im_thermal.shape[:2]}")
-            
-            # Add channel dimension to thermal if needed (H,W) -> (H,W,1)
-            im_thermal = im_thermal[..., None]
-            
-            # Concatenate along channel dimension: RGB (3) + Thermal (1) = 4 channels
-            im = np.concatenate([im_rgb, im_thermal], axis=-1)  # Result: (H, W, 4)
-            
-            h0, w0 = im_rgb.shape[:2]  # orig hw (both images have same size)
-            
-            # Resize logic (applied to the concatenated 4-channel image)
-            if rect_mode:  # resize long side to imgsz while maintaining aspect ratio
-                r = self.imgsz / max(h0, w0)  # ratio
-                if r != 1:  # if sizes are not equal
-                    w, h = (min(math.ceil(w0 * r), self.imgsz), min(math.ceil(h0 * r), self.imgsz))
-                    # cv2.resize supports multi-channel, but ensure interpolation is appropriate
-                    im = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
-            elif not (h0 == w0 == self.imgsz):  # resize by stretching image to square imgsz
-                im = cv2.resize(im, (self.imgsz, self.imgsz), interpolation=cv2.INTER_LINEAR)
+        修正版：支持 RGBT 4通道读取，修复维度冲突和变量未定义问题。
+        """
+        # 1. 检查内存缓存
+        if self.ims[i] is not None:
+            return self.ims[i], self.im_hw0[i], self.im_hw[i]
 
-            # Add to buffer if training with augmentations
-            if self.augment:
-                self.ims[i], self.im_hw0[i], self.im_hw[i] = im, (h0, w0), im.shape[:2]  # im, hw_original, hw_resized
-                self.buffer.append(i)
-                if 1 < len(self.buffer) >= self.max_buffer_length:  # prevent empty buffer
-                    j = self.buffer.pop(0)
-                    if self.cache != "ram":
-                        self.ims[j], self.im_hw0[j], self.im_hw[j] = None, None, None
+        # 2. 定义文件路径 (f 是从 self.im_files[i] 拿到的原始路径)
+        f = self.im_files[i]
+        f_rgb = str(f)
 
-            return im, (h0, w0), im.shape[:2]
+        # 【关键】：根据你刚才建立的文件夹名称推导红外路径
+        # 如果你用的是 rebuild_dataset_v2.py，文件夹应该是 images_ir_aligned
+        f_ir = f_rgb.replace('images_rgb', 'images_ir_aligned').replace('_a_rgb.jpg', '_b_ir.jpg')
 
-        return self.ims[i], self.im_hw0[i], self.im_hw[i]
+        # 3. 读取图像
+        im_rgb = cv2.imread(f_rgb)
+        im_ir = cv2.imread(f_ir, cv2.IMREAD_GRAYSCALE)
+
+        if im_rgb is None:
+            raise FileNotFoundError(f"找不到 RGB 图片: {f_rgb}")
+        if im_ir is None:
+            # 如果 replace 逻辑没对上，这里会报错，你可以根据打印的路径微调
+            raise FileNotFoundError(f"找不到配对的 IR 图片: {f_ir}")
+
+        # 4. 统一 RGB 维度为 (H, W, 3)
+        if im_rgb.ndim == 2:
+            im_rgb = cv2.cvtColor(im_rgb, cv2.COLOR_GRAY2BGR)
+        elif im_rgb.shape[2] == 4:
+            im_rgb = im_rgb[:, :, :3]
+
+        # 5. 统一 IR 维度为 (H, W, 1)
+        if im_ir.ndim == 2:
+            im_ir = im_ir[:, :, np.newaxis]
+        elif im_ir.ndim == 3:
+            if im_ir.shape[2] > 1:
+                im_ir = cv2.cvtColor(im_ir, cv2.COLOR_BGR2GRAY)[:, :, np.newaxis]
+
+        # 6. 强制对齐空间分辨率
+        if im_rgb.shape[:2] != im_ir.shape[:2]:
+            im_ir = cv2.resize(im_ir, (im_rgb.shape[1], im_rgb.shape[0]), interpolation=cv2.INTER_LINEAR)
+            if im_ir.ndim == 2:  # 防止 resize 把最后一个维度搞丢
+                im_ir = im_ir[:, :, np.newaxis]
+
+        # 7. 拼接成 4 通道 (H, W, 4) —— 此时两者都是 3 维，拼接不会报错
+        im = np.concatenate([im_rgb, im_ir], axis=-1)
+
+        # 8. YOLO 标准 Resize 逻辑
+        h0, w0 = im.shape[:2]
+        r = self.imgsz / max(h0, w0)
+        if r != 1:
+            w, h = (min(math.ceil(w0 * r), self.imgsz), min(math.ceil(h0 * r), self.imgsz))
+            im = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
+            if im.ndim == 2:  # 再次保险
+                im = im[:, :, np.newaxis]
+
+        # 9. 如果是训练阶段，更新缓存
+        if self.augment:
+            self.ims[i], self.im_hw0[i], self.im_hw[i] = im, (h0, w0), im.shape[:2]
+
+        return im, (h0, w0), im.shape[:2]
+
+
 
     def cache_images(self) -> None:
         """Cache images to memory or disk for faster training."""
