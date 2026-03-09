@@ -64,6 +64,7 @@ __all__ = (
     "CBAMFusion",
     "TransformerFusion",
     "Swin_Transformer_Fusion",
+    "PyramidShuffleLevel",
 )
 
 
@@ -2498,3 +2499,41 @@ class Swin_Transformer_Fusion(nn.Module):
         # 终点：换回 YOLO 架构所需的 BCHW 格式
         return fused.permute(0, 3, 1, 2).contiguous()
 
+class PyramidShuffleLevel(nn.Module):
+    """
+    金字塔洗牌模块 (Pyramid Shuffle)
+    输入为主干网络输出的 P3, P4, P5，抽取少量通道进行跨尺度交换，输出对应尺度的融合特征。
+    """
+    def __init__(self, level_idx=1, shuffle_c=32):
+        super().__init__()
+        self.level_idx = level_idx  # 0代表输出P3, 1代表输出P4, 2代表输出P5
+        self.S = shuffle_c          # 交换的通道数
+
+    def forward(self, x):
+        # x 接收一个列表:[p3_tensor, p4_tensor, p5_tensor]
+        p3, p4, p5 = x
+        S = self.S
+        
+        if self.level_idx == 0:  # 目标是重构 P3
+            # 保留 P3 原本的 (C3 - S) 个通道，从 P4 抓取 S 个通道并上采样
+            p3_keep = p3[:, :-S, :, :]
+            p4_grab = p4[:, -S:, :, :]
+            p4_up = F.interpolate(p4_grab, size=p3.shape[2:], mode='nearest')
+            return torch.cat([p3_keep, p4_up], dim=1)
+            
+        elif self.level_idx == 1:  # 目标是重构 P4
+            # 保留 P4 原本的 (C4 - 2S) 个通道，从 P3 和 P5 各抓取 S 个通道
+            p4_keep = p4[:, :-2*S, :, :]
+            p3_grab = p3[:, -S:, :, :]
+            p5_grab = p5[:, -S:, :, :]
+            # P3 下采样，P5 上采样，对齐到 P4 尺寸
+            p3_down = F.adaptive_avg_pool2d(p3_grab, output_size=p4.shape[2:])
+            p5_up = F.interpolate(p5_grab, size=p4.shape[2:], mode='nearest')
+            return torch.cat([p4_keep, p3_down, p5_up], dim=1)
+            
+        elif self.level_idx == 2:  # 目标是重构 P5
+            # 保留 P5 原本的 (C5 - S) 个通道，从 P4 抓取 S 个通道并下采样
+            p5_keep = p5[:, :-S, :, :]
+            p4_grab = p4[:, -S:, :, :]
+            p4_down = F.adaptive_avg_pool2d(p4_grab, output_size=p5.shape[2:])
+            return torch.cat([p5_keep, p4_down], dim=1)
