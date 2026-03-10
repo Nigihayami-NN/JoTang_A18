@@ -202,26 +202,12 @@ class Model(torch.nn.Module):
 
     @staticmethod
     def is_hub_model(model: str) -> bool:
-        """Check if the provided model is an Ultralytics HUB model.
-
-        This static method determines whether the given model string represents a valid Ultralytics HUB model
-        identifier.
-
-        Args:
-            model (str): The model string to check.
-
-        Returns:
-            (bool): True if the model is a valid Ultralytics HUB model, False otherwise.
-
-        Examples:
-            >>> Model.is_hub_model("https://hub.ultralytics.com/models/MODEL")
-            True
-            >>> Model.is_hub_model("yolo26n.pt")
-            False
-        """
-        from ultralytics.hub import HUB_WEB_ROOT
-
-        return model.startswith(f"{HUB_WEB_ROOT}/models/")
+        """Check if the provided model is an Ultralytics HUB model."""
+        try:
+            from ultralytics.hub import HUB_WEB_ROOT
+            return model.startswith(f"{HUB_WEB_ROOT}/models/")
+        except ImportError:
+            return False
 
     def _new(self, cfg: str, task=None, model=None, verbose=False) -> None:
         """Initialize a new model and infer the task type from model definitions.

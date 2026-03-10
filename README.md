@@ -10,6 +10,10 @@ prepare for CSIEC
 JoTang_A18
 ├── ultralytics
 └──CustomDataSet
-       |-Images> train/ ; val/ ; test/ #三个文件夹
-       |-Labels> train/ ; val/ ; test/ #三个文件夹
+|     |-Images> train/ ; val/ ; test/ 
+|     |-Labels> train/ ; val/ ; test/ #三个文件夹
+|
+|----CustomModel.yaml
+|----CustomDataSet.yaml
 ```
+其中每个文件夹中，rgb与thermal交替出现，如:000_rgb.png,000_thermal.png,111_rgb.png,111_thermal.png

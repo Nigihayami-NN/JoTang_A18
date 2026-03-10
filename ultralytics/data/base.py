@@ -117,7 +117,7 @@ class BaseDataset(Dataset):
         self.im_files = self.get_img_files(self.img_path)
         self.labels = self.get_labels()
         self.update_labels(include_class=classes)  # single_cls and include_class
-        self.ni = len(self.labels)//2  # number of images
+        self.ni = len(self.labels)  # number of images
         self.rect = rect
         self.batch_size = batch_size
         self.stride = stride
@@ -154,7 +154,7 @@ class BaseDataset(Dataset):
             img_path (str | list[str]): Path or list of paths to image directories or files.
 
         Returns:
-            (list[str]): List of image file paths.
+            (list[str]): List of image file paths (only RGB files for RGB+thermal dataset).
 
         Raises:
             FileNotFoundError: If no images are found or the path doesn't exist.
@@ -165,23 +165,25 @@ class BaseDataset(Dataset):
                 p = Path(p)  # os-agnostic
                 if p.is_dir():  # dir
                     f += glob.glob(str(p / "**" / "*.*"), recursive=True)
-                    # F = list(p.rglob('*.*'))  # pathlib
                 elif p.is_file():  # file
                     with open(p, encoding="utf-8") as t:
                         t = t.read().strip().splitlines()
                         parent = str(p.parent) + os.sep
-                        f += [x.replace("./", parent) if x.startswith("./") else x for x in t]  # local to global path
-                        # F += [p.parent / x.lstrip(os.sep) for x in t]  # local to global path (pathlib)
+                        f += [x.replace("./", parent) if x.startswith("./") else x for x in t]
                 else:
                     raise FileNotFoundError(f"{self.prefix}{p} does not exist")
             im_files = sorted(x.replace("/", os.sep) for x in f if x.rpartition(".")[-1].lower() in IMG_FORMATS)
-            # self.img_files = sorted([x for x in f if x.suffix[1:].lower() in IMG_FORMATS])  # pathlib
             assert im_files, f"{self.prefix}No images found in {img_path}. {FORMATS_HELP_MSG}"
         except Exception as e:
             raise FileNotFoundError(f"{self.prefix}Error loading data from {img_path}\n{HELP_URL}") from e
         if self.fraction < 1:
-            im_files = im_files[: round(len(im_files) * self.fraction)]  # retain a fraction of the dataset
-        check_file_speeds(im_files, prefix=self.prefix)  # check image read speeds
+            im_files = im_files[: round(len(im_files) * self.fraction)]
+        check_file_speeds(im_files, prefix=self.prefix)
+        
+        if hasattr(self, 'channels') and self.channels == 4:
+            im_files = [x for x in im_files if '_thermal' not in x.lower()]
+            im_files = sorted(im_files)
+        
         return im_files
 
     def update_labels(self, include_class: list[int] | None) -> None:
@@ -208,10 +210,10 @@ class BaseDataset(Dataset):
                 self.labels[i]["cls"][:, 0] = 0
 
     def load_image(self, i: int, rect_mode: bool = True) -> tuple[np.ndarray, tuple[int, int], tuple[int, int]]:
-        """Load an image from dataset index 'i', combining RGB (2i, 3通道) and thermal (2i+1, 1通道) images.
+        """Load an image from dataset index 'i', combining RGB (3通道) and thermal (1通道) images.
 
         Args:
-            i (int): Index of the image pair to load (loads images 2i and 2i+1).
+            i (int): Index of the image to load.
             rect_mode (bool): Whether to use rectangular resizing.
 
         Returns:
@@ -223,88 +225,76 @@ class BaseDataset(Dataset):
             FileNotFoundError: If the image file is not found.
         """
         im, f, fn = self.ims[i], self.im_files[i], self.npy_files[i]
-        if im is None:  # not cached in RAM
-            # Calculate indices for RGB (2i) and thermal (2i+1) images
-            idx_rgb = 2 * i
-            idx_thermal = 2 * i + 1
+        if im is None:
+            f_rgb = f
+            fn_rgb = fn
             
-            # Check if indices are valid
-            if idx_rgb >= len(self.im_files) or idx_thermal >= len(self.im_files):
-                raise IndexError(f"Image pair index {i} (RGB: {idx_rgb}, Thermal: {idx_thermal}) out of range "
-                            f"for dataset with {len(self.im_files)} images")
+            rgb_stem = Path(f_rgb).stem
+            rgb_ext = Path(f_rgb).suffix
+            f_thermal = str(Path(f_rgb).parent / f"{rgb_stem.replace('_rgb', '_thermal')}{rgb_ext}")
+            fn_thermal = fn.with_name(fn.stem.replace('_rgb', '_thermal') + fn.suffix)
             
-            # Get file paths for both images
-            f_rgb = self.im_files[idx_rgb]
-            f_thermal = self.im_files[idx_thermal]
-            fn_rgb = self.npy_files[idx_rgb]
-            fn_thermal = self.npy_files[idx_thermal]
-            
-            # Load RGB image (2i) - 3 channels
-            if fn_rgb.exists():  # load npy
+            if fn_rgb.exists():
                 try:
                     im_rgb = np.load(fn_rgb)
                 except Exception as e:
                     LOGGER.warning(f"{self.prefix}Removing corrupt *.npy image file {fn_rgb} due to: {e}")
                     Path(fn_rgb).unlink(missing_ok=True)
-                    im_rgb = imread(f_rgb, flags=self.cv2_flag)  # BGR by default in OpenCV
-            else:  # read image
-                im_rgb = imread(f_rgb, flags=self.cv2_flag)  # BGR by default in OpenCV
+                    im_rgb = imread(f_rgb, flags=self.cv2_flag)
+            else:
+                im_rgb = imread(f_rgb, flags=self.cv2_flag)
             
             if im_rgb is None:
                 raise FileNotFoundError(f"RGB Image Not Found {f_rgb}")
             
-            # Ensure RGB image has 3 channels
             if im_rgb.ndim == 2:
-                im_rgb = cv2.cvtColor(im_rgb, cv2.COLOR_GRAY2BGR)  # Convert grayscale to 3-channel BGR
+                im_rgb = cv2.cvtColor(im_rgb, cv2.COLOR_GRAY2BGR)
             elif im_rgb.shape[2] == 4:
-                im_rgb = im_rgb[:, :, :3]  # Remove alpha channel if present
+                im_rgb = im_rgb[:, :, :3]
             
-            # Load thermal image (2i+1) - 1 channel
-            if fn_thermal.exists():  # load npy
+            if fn_thermal.exists():
                 try:
                     im_thermal = np.load(fn_thermal)
                 except Exception as e:
                     LOGGER.warning(f"{self.prefix}Removing corrupt *.npy image file {fn_thermal} due to: {e}")
                     Path(fn_thermal).unlink(missing_ok=True)
-                    im_thermal = imread(f_thermal, flags=cv2.IMREAD_GRAYSCALE)  # Force grayscale
-            else:  # read image
-                im_thermal = imread(f_thermal, flags=cv2.IMREAD_GRAYSCALE)  # Force grayscale
+                    im_thermal = imread(f_thermal, flags=cv2.IMREAD_GRAYSCALE)
+            else:
+                im_thermal = imread(f_thermal, flags=cv2.IMREAD_GRAYSCALE)
             
             if im_thermal is None:
                 raise FileNotFoundError(f"Thermal Image Not Found {f_thermal}")
             
-            # Ensure thermal image is single channel
             if im_thermal.ndim == 3:
-                im_thermal = cv2.cvtColor(im_thermal, cv2.COLOR_BGR2GRAY)  # Convert to grayscale if needed
+                if im_thermal.shape[2] == 3:
+                    im_thermal = cv2.cvtColor(im_thermal, cv2.COLOR_BGR2GRAY)
+                elif im_thermal.shape[2] == 4:
+                    im_thermal = cv2.cvtColor(im_thermal, cv2.COLOR_BGRA2GRAY)
             
-            # Ensure both images have the same spatial dimensions
+            if im_thermal.ndim == 3:
+                if im_thermal.shape[2] == 1:
+                    im_thermal = im_thermal[:,:,0]
+            
             if im_rgb.shape[:2] != im_thermal.shape[:2]:
-                raise ValueError(f"Shape mismatch: RGB image {f_rgb} has shape {im_rgb.shape[:2]}, "
-                            f"but thermal image {f_thermal} has shape {im_thermal.shape[:2]}")
+                raise ValueError(f"Shape mismatch: RGB {im_rgb.shape[:2]} vs Thermal {im_thermal.shape[:2]}")
             
-            # Add channel dimension to thermal if needed (H,W) -> (H,W,1)
             im_thermal = im_thermal[..., None]
+            im = np.concatenate([im_rgb, im_thermal], axis=-1)
             
-            # Concatenate along channel dimension: RGB (3) + Thermal (1) = 4 channels
-            im = np.concatenate([im_rgb, im_thermal], axis=-1)  # Result: (H, W, 4)
+            h0, w0 = im_rgb.shape[:2]
             
-            h0, w0 = im_rgb.shape[:2]  # orig hw (both images have same size)
-            
-            # Resize logic (applied to the concatenated 4-channel image)
-            if rect_mode:  # resize long side to imgsz while maintaining aspect ratio
-                r = self.imgsz / max(h0, w0)  # ratio
-                if r != 1:  # if sizes are not equal
+            if rect_mode:
+                r = self.imgsz / max(h0, w0)
+                if r != 1:
                     w, h = (min(math.ceil(w0 * r), self.imgsz), min(math.ceil(h0 * r), self.imgsz))
-                    # cv2.resize supports multi-channel, but ensure interpolation is appropriate
                     im = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
-            elif not (h0 == w0 == self.imgsz):  # resize by stretching image to square imgsz
+            elif not (h0 == w0 == self.imgsz):
                 im = cv2.resize(im, (self.imgsz, self.imgsz), interpolation=cv2.INTER_LINEAR)
 
-            # Add to buffer if training with augmentations
             if self.augment:
-                self.ims[i], self.im_hw0[i], self.im_hw[i] = im, (h0, w0), im.shape[:2]  # im, hw_original, hw_resized
+                self.ims[i], self.im_hw0[i], self.im_hw[i] = im, (h0, w0), im.shape[:2]
                 self.buffer.append(i)
-                if 1 < len(self.buffer) >= self.max_buffer_length:  # prevent empty buffer
+                if 1 < len(self.buffer) >= self.max_buffer_length:
                     j = self.buffer.pop(0)
                     if self.cache != "ram":
                         self.ims[j], self.im_hw0[j], self.im_hw[j] = None, None, None
