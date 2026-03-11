@@ -65,6 +65,7 @@ __all__ = (
     "TransformerFusion",
     "Swin_Transformer_Fusion",
     "PyramidShuffleLevel",
+    "ModifiedBGIM"
 )
 
 
@@ -2583,3 +2584,149 @@ class PyramidShuffleLevel(nn.Module):
             out = torch.cat([p5_keep, p4_down], dim=1)
 
         return self.proj(out)
+    
+
+class MLP(nn.Module):
+    """
+    一个简单的两层MLP模块，用于通道注意力和门控机制。
+    包含两个全连接层、一个ReLU激活函数和一个可选的Sigmoid激活函数。
+    """
+    def __init__(self, in_channels,reduction_ratio=16, use_sigmoid=True):
+        super(MLP, self).__init__()
+        self.use_sigmoid = use_sigmoid
+        self.fc = nn.Sequential(
+            nn.Linear(in_channels, in_channels // reduction_ratio, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(in_channels // reduction_ratio, in_channels, bias=False)
+        )
+        self.sigmoid = nn.Sigmoid()
+    def forward(self, x):
+        out = self.fc(x)
+        if self.use_sigmoid:
+            out = self.sigmoid(out)
+        return out
+
+class ModifiedBGIM(nn.Module):
+    """
+    修改后的双向门控交互模块 (Modified Bidirectional Gated Interaction Module)
+    
+    该模块将通道注意力(Wc)和空间注意力(Ws)的融合方式从乘法改为了加权求和。
+    """
+    def __init__(self, c1, reduction_ratio=16):
+        """
+        初始化模块。
+        
+        Args:
+            c1 (int): 输入特征图的通道数 (对于单个模态)。
+            reduction_ratio (int): MLP中用于降低通道数的缩减比。
+        """
+        super(ModifiedBGIM, self).__init__()
+        in_channels = c1
+        
+        # ----------- 1. 通道注意力 (Wc) 计算部分 -----------
+        # MLP将接收来自两个模态的平均池化和最大池化结果，因此输入通道数为 in_channels * 4
+        self.channel_attention_mlp = MLP(in_channels * 4, reduction_ratio)
+
+        # ----------- 2. 空间注意力 (Ws) 计算部分 -----------
+        # 空间注意力没有可学习参数，直接在forward中实现
+
+        # ----------- 3. 新的加权求和融合部分 -----------
+        # 定义两个可学习的标量参数 a 和 b，用于加权 Wc 和 Ws
+        self.a = nn.Parameter(torch.ones(1))
+        self.b = nn.Parameter(torch.ones(1))
+
+        # ----------- 4. 门控机制 (Wg) 计算部分 -----------
+        # 门控MLP接收两个模态展平后的特征，输入维度是 H*W*C * 2
+        # 注意：这里的输入维度依赖于特征图大小，为简化和通用性，我们先用一个全连接层
+        # 将门控机制降维，这里我们可以使用in_channels*2 -> in_channels的MLP，但目前是reduction
+        self.gate_mlp = MLP(in_channels * 2, reduction_ratio)
+
+        # ----------- 5. 融合输出部分 -----------
+        # 兼容现有网络结构，将两个通道合并并降噪
+        self.fuse_layer = nn.Sequential(
+            nn.Conv2d(in_channels * 2, in_channels, kernel_size=1, bias=False),
+            nn.BatchNorm2d(in_channels),
+            nn.SiLU(inplace=True)
+        )
+
+
+    def forward(self, x):
+        """
+        前向传播函数。
+        
+        Args:
+            x (list or Tuple): [F_vi, F_ir] 来自分支的特征图，或者是拼接的tensor。
+            
+        Returns:
+            torch.Tensor: 融合后的特征图。
+        """
+        if isinstance(x, list) or isinstance(x, tuple):
+            F_vi, F_ir = x[0], x[1]
+        else:
+            F_vi, F_ir = torch.chunk(x, 2, dim=1)
+            
+        B, C, H, W = F_vi.size()
+
+        # ==================== 阶段一: 联合注意力权重计算 ====================
+        
+        # --- 1. 计算通道注意力权重 Wc  ---
+        # 全局平均池化和最大池化
+        avg_pool_vi = F.adaptive_avg_pool2d(F_vi, (1, 1)).view(B, C)
+        max_pool_vi = F.adaptive_max_pool2d(F_vi, (1, 1)).view(B, C)
+        avg_pool_ir = F.adaptive_avg_pool2d(F_ir, (1, 1)).view(B, C)
+        max_pool_ir = F.adaptive_max_pool2d(F_ir, (1, 1)).view(B, C)
+
+        # 拼接四个向量
+        combined_features = torch.cat([avg_pool_vi, max_pool_vi, avg_pool_ir, max_pool_ir], dim=1) # shape: (B, 4*C)
+        
+        # 送入MLP并激活，得到通道注意力权重
+        Wc_combined = self.channel_attention_mlp(combined_features) # shape: (B, 4*C)
+        # 将其Reshape成可以与特征图广播的形状 (B, 2*C, 1, 1)，其中前C个给vi,后C个给ir
+        # 假设MLP直接输出4C维向量，这里我们取前2C
+        Wc = Wc_combined[:, :2*C].view(B, 2*C, 1, 1)
+
+        # --- 2. 计算空间注意力权重 Ws  ---
+        # 沿通道维度拼接特征
+        F_cat = torch.cat((F_vi, F_ir), dim=1) # shape: (B, 2*C, H, W)
+        
+        # 沿通道维度进行平均池化和最大池化
+        avg_pool_s = torch.mean(F_cat, dim=1, keepdim=True)
+        max_pool_s, _ = torch.max(F_cat, dim=1, keepdim=True)
+        
+        # 激活后相加，得到空间注意力权重
+        Ws = torch.sigmoid(avg_pool_s) + torch.sigmoid(max_pool_s) # shape: (B, 1, H, W)
+
+        # --- 3. (核心修改) 加权求和得到混合权重 Wcs ---
+        # Wc (B, 2C, 1, 1) 和 Ws (B, 1, H, W) 会被自动广播 (broadcasting)
+        Wcs = self.a * Wc + self.b * Ws # shape: (B, 2C, H, W)
+        
+        # --- 4. 分割(Split)混合权重 (对应公式5的后半部分) ---
+        Wcs_vi, Wcs_ir = torch.split(Wcs, C, dim=1) # shape: (B, C, H, W) for each
+
+        # ==================== 阶段二: 门控纠正与特征更新 ====================
+
+        # --- 5. 计算门控校正权重 Wg  ---
+        # 为简化和鲁棒性，先对输入特征做全局平均池化再展平
+        g_vi = F.adaptive_avg_pool2d(F_vi, (1, 1)).view(B, -1)
+        g_ir = F.adaptive_avg_pool2d(F_ir, (1, 1)).view(B, -1)
+        
+        # 拼接后送入MLP得到门控权重
+        gate_input = torch.cat((g_vi, g_ir), dim=1)
+        Wg_vector = self.gate_mlp(gate_input) # shape: (B, 2*C)
+        
+        # Reshape成可以与特征图广播的形状
+        Wg = Wg_vector[:, :C].view(B, C, 1, 1) # 只取前C个维度作为门控，也可以设计别的结构
+
+        # --- 6. 使用门控权重进行纠正  ---
+        Wcsg_vis = Wcs_vi * Wg
+        Wcsg_ir = Wcs_ir * (1 - Wg)
+        
+        # --- 7. 更新原始特征  ---
+        # 使用残差连接的方式，将权重乘回原特征
+        F_vi_out = F_vi * (1 + Wcsg_vis)
+        F_ir_out = F_ir * (1 + Wcsg_ir)
+
+        # 拼接并降维，输出C个通道，匹配CBAMFusion输出维度
+        out = self.fuse_layer(torch.cat([F_vi_out, F_ir_out], dim=1))
+
+        return out
