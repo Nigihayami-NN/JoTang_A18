@@ -1,13 +1,13 @@
 # JoTang_A18
 # ├── ultralytics
 # └── CustomDataSet
-#        |- Images
-#        |- Labels
+#        |- images
+#        |- labels
             
 path: ./CustomDataSet # dataset root dir
-train: Images/train # train images (relative to 'path')
-val: Images/val # val images (relative to 'path') 
-test: Images/test # test images (relative to 'path') 
+train: images/train # train images (relative to 'path')
+val: images/val # val images (relative to 'path') 
+test: images/test # test images (relative to 'path') 
 
 # Classes (共10个类别，编号0-9)
 names:
