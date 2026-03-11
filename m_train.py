@@ -8,7 +8,7 @@ def transplant_and_train():
     # 1. 核心路径配置
     # ==========================================
     YAML_PATH = "m-test.yaml"  # 你另存为的 M 版配置
-    DATA_YAML = "test_bus.yaml"
+    DATA_YAML = "CustomDataSet.yaml"
 
     # 【关键修改】：换成 M 级官方权重
     OFFICIAL_PT = "yolo26m.pt"
@@ -51,7 +51,7 @@ def transplant_and_train():
         custom_model.save(INIT_PT)
         print(f"权重移植成功！共映射了 {count} 个张量，保存至 {INIT_PT}")
     else:
-        print(f"⚡ 发现已存在的移植权重 {INIT_PT}，直接加载。")
+        print(f"发现已存在的移植权重 {INIT_PT}，直接加载。")
 
     # ==========================================
     # 3. 启动 RTX 4090 正式训练
@@ -65,7 +65,7 @@ def transplant_and_train():
     results = model.train(
         data=DATA_YAML,
         imgsz=1024,  # 训练分辨率 (4090 的黄金尺寸)
-        epochs=300,  # 国家级比赛必须跑到 300 轮
+        epochs=150,  # 国家级比赛必须跑到 300 轮
         batch=16,  # 4090 可以尝试 16，如果 OOM 则改为 8 且设置 accumulate=2
         device=0,  # 指定显卡
         amp=True,  # 混合精度 (加速且省显存)
@@ -76,13 +76,13 @@ def transplant_and_train():
         hsv_v=0.0,  # 绝对禁用亮度增强
 
         # --- 针对小目标的高级增强 ---
-        # mosaic=1.0,  # 100% 开启马赛克增强
-        # mixup=0.15,  # 引入少量 Mixup 增加背景鲁棒性
-        # multi_scale=True,  # 开启多尺度训练 (极其重要！让模型适应各种高度的车辆)
+        mosaic=1.0,  # 100% 开启马赛克增强
+        mixup=0.15,  # 引入少量 Mixup 增加背景鲁棒性
+        multi_scale=True,  # 开启多尺度训练 (极其重要！让模型适应各种高度的车辆)
 
-        mosaic=0.0,  # 关闭马赛克
-        mixup=0.0,  # 关闭 Mixup
-        copy_paste=0.0,  # 关闭复制粘贴
+        # mosaic=0.0,  # 关闭马赛克
+        # mixup=0.0,  # 关闭 Mixup
+        # copy_paste=0.0,  # 关闭复制粘贴
 
         # --- 优化器与日志 ---
         optimizer='AdamW',  # Transformer 架构的首选优化器
@@ -90,7 +90,7 @@ def transplant_and_train():
         warmup_epochs=5,  # 给 Swin 层 5 个 Epoch 慢慢预热，防止初期梯度爆炸
 
         project="Drone_RGBT_Runs",
-        name="YOLO26x_Swin_P2_Final",
+        name="YOLO26m-test",
         save_period=10  # 每 10 轮保存一次权重，防止服务器意外断电
     )
     print("训练结束！")

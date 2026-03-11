@@ -1,6 +1,6 @@
-#"""试跑：yolo26m + swin深度2"""
+#"""试跑：yolo26m + swin深度2 + 10类"""
 
-nc: 11
+nc: 10
 ch: 4
 
 scales:
