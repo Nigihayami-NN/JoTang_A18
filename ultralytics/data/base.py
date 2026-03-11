@@ -338,19 +338,18 @@ class BaseDataset(Dataset):
 
     def load_image(self, i: int, rect_mode: bool = True) -> tuple[np.ndarray, tuple[int, int], tuple[int, int]]:
         """
-        修正版：支持 RGBT 4通道读取，修复维度冲突和变量未定义问题。
+        最终适配版：支持 [id]_co.png 和 [id]_ir.png 同文件夹结构。
         """
         # 1. 检查内存缓存
         if self.ims[i] is not None:
             return self.ims[i], self.im_hw0[i], self.im_hw[i]
 
-        # 2. 定义文件路径 (f 是从 self.im_files[i] 拿到的原始路径)
+        # 2. 定义文件路径 (i 对应 self.im_files[i]，即 [id]_co.png)
         f = self.im_files[i]
         f_rgb = str(f)
 
-        # 【关键】：根据你刚才建立的文件夹名称推导红外路径
-        # 如果你用的是 rebuild_dataset_v2.py，文件夹应该是 images_ir_aligned
-        f_ir = f_rgb.replace('images_rgb', 'images_ir_aligned').replace('_a_rgb.jpg', '_b_ir.jpg')
+        # 无论后缀是 .png 还是 .jpg 都能处理
+        f_ir = f_rgb.replace('_co', '_ir')
 
         # 3. 读取图像
         im_rgb = cv2.imread(f_rgb)
@@ -359,8 +358,7 @@ class BaseDataset(Dataset):
         if im_rgb is None:
             raise FileNotFoundError(f"找不到 RGB 图片: {f_rgb}")
         if im_ir is None:
-            # 如果 replace 逻辑没对上，这里会报错，你可以根据打印的路径微调
-            raise FileNotFoundError(f"找不到配对的 IR 图片: {f_ir}")
+            raise FileNotFoundError(f"找不到配对的 IR 图片: {f_ir}。请检查文件名是否严格对应 _co.png 和 _ir.png")
 
         # 4. 统一 RGB 维度为 (H, W, 3)
         if im_rgb.ndim == 2:
@@ -371,17 +369,14 @@ class BaseDataset(Dataset):
         # 5. 统一 IR 维度为 (H, W, 1)
         if im_ir.ndim == 2:
             im_ir = im_ir[:, :, np.newaxis]
-        elif im_ir.ndim == 3:
-            if im_ir.shape[2] > 1:
-                im_ir = cv2.cvtColor(im_ir, cv2.COLOR_BGR2GRAY)[:, :, np.newaxis]
 
         # 6. 强制对齐空间分辨率
         if im_rgb.shape[:2] != im_ir.shape[:2]:
             im_ir = cv2.resize(im_ir, (im_rgb.shape[1], im_rgb.shape[0]), interpolation=cv2.INTER_LINEAR)
-            if im_ir.ndim == 2:  # 防止 resize 把最后一个维度搞丢
+            if im_ir.ndim == 2:
                 im_ir = im_ir[:, :, np.newaxis]
 
-        # 7. 拼接成 4 通道 (H, W, 4) —— 此时两者都是 3 维，拼接不会报错
+        # 7. 拼接成 4 通道 (H, W, 4)
         im = np.concatenate([im_rgb, im_ir], axis=-1)
 
         # 8. YOLO 标准 Resize 逻辑
@@ -390,15 +385,14 @@ class BaseDataset(Dataset):
         if r != 1:
             w, h = (min(math.ceil(w0 * r), self.imgsz), min(math.ceil(h0 * r), self.imgsz))
             im = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
-            if im.ndim == 2:  # 再次保险
+            if im.ndim == 2:
                 im = im[:, :, np.newaxis]
 
-        # 9. 如果是训练阶段，更新缓存
+        # 9. 更新缓存
         if self.augment:
             self.ims[i], self.im_hw0[i], self.im_hw[i] = im, (h0, w0), im.shape[:2]
 
         return im, (h0, w0), im.shape[:2]
-
 
 
     def cache_images(self) -> None:
