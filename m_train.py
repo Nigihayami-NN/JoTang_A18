@@ -8,6 +8,7 @@ def transplant_and_train():
     # 1. 核心路径配置
     # ==========================================
     YAML_PATH = "m-test.yaml"  # 你另存为的 M 版配置
+    # DATA_YAML = "test_bus.yaml"
     DATA_YAML = "CustomDataSet.yaml"
 
     # 【关键修改】：换成 M 级官方权重
