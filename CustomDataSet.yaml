@@ -1,20 +1,23 @@
 # JoTang_A18
 # ├── ultralytics
-# └──CustomDataSet
-#        |-Images
-#        |-Labels
+# └── CustomDataSet
+#        |- Images
+#        |- Labels
             
 path: ./CustomDataSet # dataset root dir
 train: Images/train # train images (relative to 'path')
 val: Images/val # val images (relative to 'path') 
 test: Images/test # test images (relative to 'path') 
 
-# Number of channels: RGB(3) + Thermal(1) = 4 channels
-channels: 4
-
-# Classes
+# Classes (共10个类别，编号0-9)
 names:
-  0: person
-  1: vehicle
-  2: object
-  3: other 
+  0: car           # 小轿车/小汽车
+  1: pickup        # 皮卡车
+  2: camping       # 房车/露营车
+  3: truck         # 卡车/货车
+  4: other         # 其他车辆
+  5: tractor       # 拖拉机
+  6: boat          # 船只
+  7: van           # 面包车/厢式货车
+  8: bus           # 公交车/巴士 (新增)
+  9: freight car   # 货运车厢/火车货车 (新增)
