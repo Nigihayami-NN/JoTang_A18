@@ -67,6 +67,7 @@ from .block import (
     RGB_Stem,
     Thermal_Stem,
     PyramidShuffleLevel,
+    ModifiedBGIM,
 )
 from .conv import (
     CBAM,
@@ -203,4 +204,5 @@ __all__ = (
     "TransformerFusion",
     "Swin_Transformer_Fusion",
     "PyramidShuffleLevel",
+    "ModifiedBGIM",
 )
