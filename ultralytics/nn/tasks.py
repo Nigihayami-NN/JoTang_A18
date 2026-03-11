@@ -79,7 +79,8 @@ from ultralytics.nn.modules import (
     CBAMFusion,
     TransformerFusion,
     Swin_Transformer_Fusion,
-    PyramidShuffleLevel
+    PyramidShuffleLevel,
+    ModifiedBGIM
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, LOGGER, YAML, colorstr, emojis
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -1712,7 +1713,7 @@ def parse_model(d, ch, verbose=True):
             args = [c1_list, c2, level_idx]
 
 
-        elif m.__name__ in {"CBAMFusion", "Swin_Transformer_Fusion"}:
+        elif m.__name__ in {"CBAMFusion", "Swin_Transformer_Fusion", "ModifiedBGIM"}:
 
             c2 = args[0]
 
