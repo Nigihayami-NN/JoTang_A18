@@ -1,4 +1,4 @@
-# 总共有RGBT_Stem RGBT_Conv RGBT_C3k2 GBT_SPDConv RGBT_SPPF CBAMFusion TransformerFusion
+# 总共有RGBT_Stem RGBT_Conv RGBT_C3k2 GBT_SPDConv RGBT_SPPF ModifiedBGIM TransformerFusion
 # 七个模块需要在 ultralytics/nn/modules/block.py 中写
 
 nc: 10
@@ -25,8 +25,8 @@ backbone:
   - [-1, 1, RGBT_SPPF, [1024, 5, 3, True]] # 9:
 
   # --- 融合层：把“双层巴士”融合成“单层巴士” ---
-  - [2, 1, CBAMFusion, [256]]              # 10: 接收元组，输出单张量
-  - [4, 1, CBAMFusion, [512]]              # 11:
+  - [2, 1, ModifiedBGIM, [256]]              # 10: 接收元组，输出单张量
+  - [4, 1, ModifiedBGIM, [512]]              # 11:
   - [6, 1, TransformerFusion, [512, 8]]    # 12:
   - [9, 1, TransformerFusion, [1024, 16]]  # 13:
 
