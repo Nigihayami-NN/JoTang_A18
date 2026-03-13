@@ -61,11 +61,12 @@ __all__ = (
     "RGB_Stem",
     "Thermal_Stem",
     "SPDConv",
-    "CBAMFusion",
     "TransformerFusion",
     "Swin_Transformer_Fusion",
     "PyramidShuffleLevel",
-    "ModifiedBGIM"
+    "ModifiedBGIM",
+    "WAFF",
+    "ASFF",
 )
 
 
@@ -2082,7 +2083,7 @@ class RealNVP(nn.Module):
 
 
 
-#加入 PassThrough, RGB_Stem, Thermal_Stem, SPDConv, CBAMFusion, Swin_Transformer_Fusion
+#加入 PassThrough, RGB_Stem, Thermal_Stem, SPDConv, Swin_Transformer_Fusion
 
 class PassThrough(nn.Module):
     """
@@ -2188,55 +2189,7 @@ class SPDConv(nn.Module):
         data = self.conv(data)
         return data
 
-class CBAMFusion(nn.Module):
-    """
-        轻量自注意力
-    """
-    def __init__(self, c1, reduction_ratio=16):
-        super().__init__()
-        self.reduce_conv = Conv(c1*2, c1)
 
-        c_reduced = max(1, c1//reduction_ratio)
-        self.mlp = nn.Sequential(
-            nn.Conv2d(c1, c_reduced, 1, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(c_reduced, c1, 1, bias=False),
-        )
-        self.ch_sigmoid = nn.Sigmoid()
-
-        self.conv1 = nn.Conv2d(2, 1, 7, 1 ,padding=3)# 7*7卷积核论文证明
-        self.ch_avg = nn.AdaptiveAvgPool2d((1, 1))
-        self.ch_max = nn.AdaptiveMaxPool2d((1, 1))
-        self.sp_sigmoid = nn.Sigmoid()
-
-    def forward(self, x):# 传入以及拼接好的rgb, thm
-        if isinstance(x, list):
-            x = torch.cat(x, dim=1)
-        x = self.reduce_conv(x)# 通道减半，B,c1,h,w
-
-        # 通道注意力机制，h*w->1*1
-        ch_avg = self.ch_avg(x)
-        ch_max = self.ch_max(x)
-
-        # 通道逻辑
-        ch_avg = self.mlp(ch_avg)
-        ch_max = self.mlp(ch_max)
-
-        ch_att = self.ch_sigmoid(ch_avg + ch_max)
-
-        x = x * ch_att
-
-        # 空间注意力机制，通道压为一层
-        sp_avg = torch.mean(x, dim=1, keepdim=True)
-        sp_max, _ = torch.max(x, dim=1, keepdim=True)
-
-        # 空间逻辑
-        sp_att = self.conv1(torch.cat((sp_avg, sp_max), dim=1))
-        sp_att = self.sp_sigmoid(sp_att)
-
-        x = x * sp_att
-
-        return x
 
 
 class TransformerFusion(nn.Module):
@@ -2758,7 +2711,93 @@ class ModifiedBGIM(nn.Module):
         F_vi_out = F_vi * (1 + Wcsg_vis)
         F_ir_out = F_ir * (1 + Wcsg_ir)
 
-        # 拼接并降维，输出C个通道，匹配CBAMFusion输出维度
+        # 拼接并降维，输出C个通道，匹配输出维度
         out = self.fuse_layer(torch.cat([F_vi_out, F_ir_out], dim=1))
 
         return out
+    
+
+class WAFF(nn.Module):
+    """WAFF: layer-wise weighted fusion with strict channel/scale alignment.
+
+    Args:
+        in_channels_list (list[int]): Input channels of each feature level.
+        out_channels (int): Output channels of fused feature.
+        level (int): Target spatial level used for resizing.
+        reduction (int): Reduction ratio in gating MLP.
+    """
+
+    def __init__(self, in_channels_list, out_channels, level=0, reduction=4):
+        super().__init__()
+        self.num_levels = len(in_channels_list)
+        self.level = max(0, min(int(level), self.num_levels - 1))
+
+        self.align = nn.ModuleList(Conv(c, out_channels, k=1, s=1) for c in in_channels_list)
+        hidden = max((self.num_levels * out_channels) // max(int(reduction), 1), self.num_levels)
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.gate = nn.Sequential(
+            nn.Linear(self.num_levels * out_channels, hidden, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden, self.num_levels, bias=True),
+        )
+        self.refine = Conv(out_channels, out_channels, k=3, s=1)
+
+    def forward(self, x):
+        if not isinstance(x, (list, tuple)) or len(x) != self.num_levels:
+            raise TypeError(f"WAFF expects {self.num_levels} input features, but got {type(x)} with len={len(x) if isinstance(x, (list, tuple)) else 'N/A'}")
+
+        target_size = x[self.level].shape[2:]
+        feats = []
+        pooled = []
+        for i, feat in enumerate(x):
+            feat = self.align[i](feat)
+            if feat.shape[2:] != target_size:
+                feat = F.interpolate(feat, size=target_size, mode="nearest")
+            feats.append(feat)
+            pooled.append(self.pool(feat).flatten(1))
+
+        logits = self.gate(torch.cat(pooled, dim=1))  # (B, L)
+        weights = F.softmax(logits, dim=1).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)  # (B, L, 1, 1, 1)
+
+        fused = torch.sum(torch.stack(feats, dim=1) * weights, dim=1)
+        return self.refine(fused)
+    
+
+class ASFF(nn.Module):
+    """ASFF: pixel-wise weighted fusion with strict channel/scale alignment.
+
+    Args:
+        in_channels_list (list[int]): Input channels of each feature level.
+        out_channels (int): Output channels of fused feature.
+        level (int): Target spatial level used for resizing.
+    """
+
+    def __init__(self, in_channels_list, out_channels, level=0):
+        super().__init__()
+        self.num_levels = len(in_channels_list)
+        self.level = max(0, min(int(level), self.num_levels - 1))
+
+        self.align = nn.ModuleList(Conv(c, out_channels, k=1, s=1) for c in in_channels_list)
+        self.weight_convs = nn.ModuleList(
+            nn.Conv2d(out_channels, 1, kernel_size=3, stride=1, padding=1, bias=True) for _ in in_channels_list
+        )
+        self.refine = Conv(out_channels, out_channels, k=3, s=1)
+
+    def forward(self, x):
+        if not isinstance(x, (list, tuple)) or len(x) != self.num_levels:
+            raise TypeError(f"ASFF expects {self.num_levels} input features, but got {type(x)} with len={len(x) if isinstance(x, (list, tuple)) else 'N/A'}")
+
+        target_size = x[self.level].shape[2:]
+        feats, logits = [], []
+        for i, feat in enumerate(x):
+            feat = self.align[i](feat)
+            if feat.shape[2:] != target_size:
+                feat = F.interpolate(feat, size=target_size, mode="nearest")
+            feats.append(feat)
+            logits.append(self.weight_convs[i](feat))
+
+        weights = F.softmax(torch.cat(logits, dim=1), dim=1)
+        fused = torch.zeros_like(feats[0])
+        for i, feat in enumerate(feats):
+            fused += feat * weights[:, i : i + 1]
+        return self.refine(fused)

@@ -76,11 +76,12 @@ from ultralytics.nn.modules import (
     RGB_Stem,
     Thermal_Stem,
     SPDConv,
-    CBAMFusion,
     TransformerFusion,
     Swin_Transformer_Fusion,
     PyramidShuffleLevel,
-    ModifiedBGIM
+    ModifiedBGIM,
+    WAFF,
+    ASFF,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, LOGGER, YAML, colorstr, emojis
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -1686,7 +1687,7 @@ def parse_model(d, ch, verbose=True):
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
 
-            # === 你的竞赛模块专属拦截区 (请精确复制这段) ===
+            # === 你的模块专属拦截区 (请精确复制这段) ===
 
         elif m.__name__ == "PyramidShuffleLevel":
 
@@ -1713,7 +1714,7 @@ def parse_model(d, ch, verbose=True):
             args = [c1_list, c2, level_idx]
 
 
-        elif m.__name__ in {"CBAMFusion", "Swin_Transformer_Fusion", "ModifiedBGIM"}:
+        elif m.__name__ in {"Swin_Transformer_Fusion", "ModifiedBGIM"}:
 
             c2 = args[0]
 
@@ -1722,6 +1723,22 @@ def parse_model(d, ch, verbose=True):
 
             args = [c2, *args[1:]]
 
+        elif m is WAFF:
+            in_channels = [ch[x] for x in f] if isinstance(f, list) else [ch[f]]
+            level = int(args[1]) if len(args) > 1 else 0
+            reduction = int(args[2]) if len(args) > 2 else 4
+            c2 = int(args[0]) if len(args) else in_channels[max(0, min(level, len(in_channels) - 1))]
+            if c2 != nc:
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
+            args = [in_channels, c2, level, reduction]
+
+        elif m is ASFF:
+            in_channels = [ch[x] for x in f] if isinstance(f, list) else [ch[f]]
+            level = int(args[1]) if len(args) > 1 else 0
+            c2 = int(args[0]) if len(args) else in_channels[max(0, min(level, len(in_channels) - 1))]
+            if c2 != nc:
+                c2 = make_divisible(min(c2, max_channels) * width, 8)
+            args = [in_channels, c2, level]
 
         # ============================================
 
