@@ -2457,11 +2457,30 @@ class Swin_Transformer_Fusion(nn.Module):
         self.cross_align = Swin_Cross_Align_Block(c1, num_heads, window_size)
 
         # 2. 降维合并枢纽 (使用 mlp 将 2*c1 变为 c1，因为当前是 BHWC 格式)
+        # self.fusion_bridge = nn.Sequential(
+        #     nn.LayerNorm(c1 * 2),
+        #     nn.Linear(c1 * 2, c1 * 2, bias=False),
+        #     nn.GELU(),
+        #     nn.Linear(c1 * 2, c1, bias=False),
+        #     nn.LayerNorm(c1)
+        # )
+
+        # 动态模态感知门
+        # 作用：通过全局特征评估当前环境下 RGB 和 Thermal 谁更可靠
+        reduction = max(c1 // 4, 16) # 缩减率
+        self.modality_gate = nn.Sequential(
+            nn.Linear(c1 * 2, reduction, bias=False),
+            nn.GELU(),
+            nn.Linear(reduction, c1 * 2, bias=False),
+            nn.Sigmoid() # 输出 0~1 的动态权重
+        )
+
+        # 2. 降维合并枢纽
         self.fusion_bridge = nn.Sequential(
             nn.LayerNorm(c1 * 2),
-            nn.Linear(c1 * 2, c1 * 2, bias=False),
-            nn.GELU(),
             nn.Linear(c1 * 2, c1, bias=False),
+            nn.GELU(),
+            nn.Linear(c1, c1, bias=False),
             nn.LayerNorm(c1)
         )
 
@@ -2491,6 +2510,19 @@ class Swin_Transformer_Fusion(nn.Module):
 
         # Stage 2: 降维融合 (拼接后送入 mlp 降维)
         fused = torch.cat([rgb, thm], dim=-1)  # [B, H, W, c1*2]
+
+        # 获取全局上下文 (Global Context)
+        avg_ctx = fused.mean(dim=(1, 2), keepdim=True)  # [B, 1, 1, 2*c1]
+        max_ctx = torch.amax(fused, dim=(1, 2), keepdim=True)  # [B, 1, 1, 2*c1]
+
+        # 拼接均值和最大值，形成“质量感知向量”
+        ctx = torch.cat([avg_ctx, max_ctx], dim=-1)
+        gate_weights = self.modality_gate(ctx)  # [B, 1, 1, c1*2]
+
+        # 门控加权：如果 RGB 是噪声，它的通道权重会自动被压低到接近 0
+        fused = fused * gate_weights
+
+        # Stage 2: 降维融合
         fused = self.fusion_bridge(fused)  # [B, H, W, c1]
 
         # Stage 3: 深度上下文推理 (Shift 循环)
