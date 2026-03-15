@@ -2418,11 +2418,13 @@ class Swin_Transformer_Fusion(nn.Module):
         #     nn.LayerNorm(c1)
         # )
 
+        c_mid = c1 // 2
+        mid_heads = max(1, num_heads // 2)
         # 动态模态感知门
         # 作用：通过全局特征评估当前环境下 RGB 和 Thermal 谁更可靠
         reduction = max(c1 // 4, 16) # 缩减率
         self.modality_gate = nn.Sequential(
-            nn.Linear(c1 * 2, reduction, bias=False),
+            nn.Linear(c1 * 4, reduction, bias=False),
             nn.GELU(),
             nn.Linear(reduction, c1 * 2, bias=False),
             nn.Sigmoid() # 输出 0~1 的动态权重
@@ -2431,10 +2433,10 @@ class Swin_Transformer_Fusion(nn.Module):
         # 2. 降维合并枢纽
         self.fusion_bridge = nn.Sequential(
             nn.LayerNorm(c1 * 2),
-            nn.Linear(c1 * 2, c1, bias=False),
+            nn.Linear(c1 * 2, c_mid, bias=False),
             nn.GELU(),
-            nn.Linear(c1, c1, bias=False),
-            nn.LayerNorm(c1)
+            nn.Linear(c_mid, c_mid, bias=False),
+            nn.LayerNorm(c_mid)
         )
 
         # 3. 单流深度推理阶段 (第 1 到 depth-1 层，交替移窗)
@@ -2443,8 +2445,13 @@ class Swin_Transformer_Fusion(nn.Module):
             # 因为第 0 层没移窗，所以第 1 层开启移窗，后续交替
             shift_opt = (i % 2 != 0)
             self.self_reasoning.append(
-                Swin_Self_Reasoning_Block(c1, num_heads, window_size, shift=shift_opt)
+                Swin_Self_Reasoning_Block(c_mid, mid_heads, window_size, shift=shift_opt)
             )
+
+        self.expand_bridge = nn.Sequential(
+            nn.Linear(c_mid, c1, bias=False),
+            nn.LayerNorm(c1),
+        )
 
     def forward(self, x):
         # 预处理：解析输入并转为 Transformer 需要的 BHWC
@@ -2464,11 +2471,11 @@ class Swin_Transformer_Fusion(nn.Module):
         # Stage 2: 降维融合 (拼接后送入 mlp 降维)
         fused = torch.cat([rgb, thm], dim=-1)  # [B, H, W, c1*2]
 
-        # 获取全局上下文 (Global Context)
+        # 获取全局上下文 (Global Context) 提取特征
         avg_ctx = fused.mean(dim=(1, 2), keepdim=True)  # [B, 1, 1, 2*c1]
         max_ctx = torch.amax(fused, dim=(1, 2), keepdim=True)  # [B, 1, 1, 2*c1]
 
-        # 拼接均值和最大值，形成“质量感知向量”
+        # 拼接均值和最大值，根据提取的特征算出权重
         ctx = torch.cat([avg_ctx, max_ctx], dim=-1)
         gate_weights = self.modality_gate(ctx)  # [B, 1, 1, c1*2]
 
@@ -2482,6 +2489,7 @@ class Swin_Transformer_Fusion(nn.Module):
         for layer in self.self_reasoning:
             fused = layer(fused)
 
+        fused = self.expand_bridge(fused)  #恢复尺寸
         # 终点：换回 YOLO 架构所需的 BCHW 格式
         return fused.permute(0, 3, 1, 2).contiguous()
 
