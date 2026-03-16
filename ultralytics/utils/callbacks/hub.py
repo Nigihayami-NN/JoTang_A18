@@ -3,7 +3,12 @@
 import json
 from time import time
 
-from ultralytics.hub import HUB_WEB_ROOT, PREFIX, HUBTrainingSession
+try:
+    from ultralytics.hub import HUB_WEB_ROOT, PREFIX, HUBTrainingSession
+except ImportError:
+    HUB_WEB_ROOT = ""
+    PREFIX = ""
+    HUBTrainingSession = None
 from ultralytics.utils import LOGGER, RANK, SETTINGS
 from ultralytics.utils.events import events
 

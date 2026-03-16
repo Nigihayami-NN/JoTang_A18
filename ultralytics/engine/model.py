@@ -219,9 +219,11 @@ class Model(torch.nn.Module):
             >>> Model.is_hub_model("yolo26n.pt")
             False
         """
-        from ultralytics.hub import HUB_WEB_ROOT
-
-        return model.startswith(f"{HUB_WEB_ROOT}/models/")
+        try:
+            from ultralytics.hub import HUB_WEB_ROOT
+            return model.startswith(f"{HUB_WEB_ROOT}/models/")
+        except ImportError:
+            return False
 
     def _new(self, cfg: str, task=None, model=None, verbose=False) -> None:
         """Initialize a new model and infer the task type from model definitions.

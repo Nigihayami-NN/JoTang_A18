@@ -4,6 +4,9 @@ from ultralytics import YOLO
 
 
 def transplant_and_train():
+    import datetime
+    print(f"[{datetime.datetime.now()}] 开始执行训练脚本")
+    
     # ==========================================
     # 1. 核心路径配置
     # ==========================================
@@ -14,6 +17,12 @@ def transplant_and_train():
     # 【关键修改】：换成 M 级官方权重
     OFFICIAL_PT = "yolo26m.pt"
     INIT_PT = "weights/rgbt_v26M_init.pt"
+    
+    print(f"[{datetime.datetime.now()}] 配置信息：")
+    print(f"  - 配置文件: {YAML_PATH}")
+    print(f"  - 数据集: {DATA_YAML}")
+    print(f"  - 官方权重: {OFFICIAL_PT}")
+    print(f"  - 初始化权重: {INIT_PT}")
 
     # ==========================================
     # 2. 权重移植逻辑 (一键无缝转换)
@@ -68,7 +77,7 @@ def transplant_and_train():
         imgsz=1024,  # 训练分辨率 (4090 的黄金尺寸)
         epochs=150,  # 国家级比赛必须跑到 300 轮
         batch=16,  # 4090 可以尝试 16，如果 OOM 则改为 8 且设置 accumulate=2
-        device=0,  # 指定显卡
+        device='cpu',  # 指定CPU，因为没有可用的CUDA设备
         amp=True,  # 混合精度 (加速且省显存)
 
         # --- 针对 4 通道的必须设置 ---

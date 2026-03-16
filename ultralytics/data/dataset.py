@@ -162,7 +162,21 @@ class YOLODataset(BaseDataset):
         Returns:
             (list[dict]): List of label dictionaries, each containing information about an image and its annotations.
         """
-        self.label_files = img2label_paths(self.im_files)
+        # 【RGBT 数据集特殊处理】
+        # 对于 RGBT 双通道数据集，图片命名格式为 [id]_co.jpg 和 [id]_ir.jpg
+        # 但标签命名格式为 [id].txt，需要特殊处理
+        if self.im_files and any('_co.' in f or '_ir.' in f for f in self.im_files):
+            # RGBT 数据集：去掉 _co 或 _ir 后缀来匹配标签文件
+            import re
+            self.label_files = []
+            for f in self.im_files:
+                # 将 images/train/00001_co.jpg 转换为 labels/train/00001.txt
+                label_path = img2label_paths([f])[0]
+                # 去掉 _co 或 _ir 后缀
+                label_path = re.sub(r'_(co|ir)\.txt$', '.txt', label_path)
+                self.label_files.append(label_path)
+        else:
+            self.label_files = img2label_paths(self.im_files)
         cache_path = Path(self.label_files[0]).parent.with_suffix(".cache")
         try:
             cache, exists = load_dataset_cache_file(cache_path), True  # attempt to load a *.cache file
