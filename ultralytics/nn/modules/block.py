@@ -2188,15 +2188,17 @@ class SPDConv(nn.Module):
         data = self.conv(data)
         return data
 
+
 class CBAMFusion(nn.Module):
     """
         轻量自注意力
     """
+
     def __init__(self, c1, reduction_ratio=16):
         super().__init__()
-        self.reduce_conv = Conv(c1*2, c1)
+        self.reduce_conv = Conv(c1 * 2, c1)
 
-        c_reduced = max(1, c1//reduction_ratio)
+        c_reduced = max(1, c1 // reduction_ratio)
         self.mlp = nn.Sequential(
             nn.Conv2d(c1, c_reduced, 1, bias=False),
             nn.ReLU(inplace=True),
@@ -2204,15 +2206,15 @@ class CBAMFusion(nn.Module):
         )
         self.ch_sigmoid = nn.Sigmoid()
 
-        self.conv1 = nn.Conv2d(2, 1, 7, 1 ,padding=3)# 7*7卷积核论文证明
+        self.conv1 = nn.Conv2d(2, 1, 7, 1, padding=3)  # 7*7卷积核论文证明
         self.ch_avg = nn.AdaptiveAvgPool2d((1, 1))
         self.ch_max = nn.AdaptiveMaxPool2d((1, 1))
         self.sp_sigmoid = nn.Sigmoid()
 
-    def forward(self, x):# 传入以及拼接好的rgb, thm
+    def forward(self, x):  # 传入以及拼接好的rgb, thm
         if isinstance(x, list):
             x = torch.cat(x, dim=1)
-        x = self.reduce_conv(x)# 通道减半，B,c1,h,w
+        x = self.reduce_conv(x)  # 通道减半，B,c1,h,w
 
         # 通道注意力机制，h*w->1*1
         ch_avg = self.ch_avg(x)
@@ -2224,7 +2226,7 @@ class CBAMFusion(nn.Module):
 
         ch_att = self.ch_sigmoid(ch_avg + ch_max)
 
-        x = x * ch_att
+        x = x * (1.0 + ch_att)
 
         # 空间注意力机制，通道压为一层
         sp_avg = torch.mean(x, dim=1, keepdim=True)
@@ -2234,7 +2236,7 @@ class CBAMFusion(nn.Module):
         sp_att = self.conv1(torch.cat((sp_avg, sp_max), dim=1))
         sp_att = self.sp_sigmoid(sp_att)
 
-        x = x * sp_att
+        x = x * (1.0 + sp_att)
 
         return x
 
@@ -2385,6 +2387,7 @@ class Swin_Cross_Align_Block(nn.Module):
 
         return rgb, thm
 
+
 # 3. 阶段二：单流自注意力块 (Self-Reasoning Block) - 用于后续层，支持移窗
 class Swin_Self_Reasoning_Block(nn.Module):
     """
@@ -2442,6 +2445,7 @@ class Swin_Self_Reasoning_Block(nn.Module):
 
         return x
 
+
 # 4. 顶层管理：YOLO 直接调用的融合大一统容器
 class Swin_Transformer_Fusion(nn.Module):
     """
@@ -2457,12 +2461,33 @@ class Swin_Transformer_Fusion(nn.Module):
         self.cross_align = Swin_Cross_Align_Block(c1, num_heads, window_size)
 
         # 2. 降维合并枢纽 (使用 mlp 将 2*c1 变为 c1，因为当前是 BHWC 格式)
+        # self.fusion_bridge = nn.Sequential(
+        #     nn.LayerNorm(c1 * 2),
+        #     nn.Linear(c1 * 2, c1 * 2, bias=False),
+        #     nn.GELU(),
+        #     nn.Linear(c1 * 2, c1, bias=False),
+        #     nn.LayerNorm(c1)
+        # )
+
+        c_mid = c1 // 2
+        mid_heads = max(1, num_heads // 2)
+        # 动态模态感知门
+        # 作用：通过全局特征评估当前环境下 RGB 和 Thermal 谁更可靠
+        reduction = max(c1 // 4, 16)  # 缩减率
+        self.modality_gate = nn.Sequential(
+            nn.Linear(c1 * 4, reduction, bias=False),
+            nn.GELU(),
+            nn.Linear(reduction, c1 * 2, bias=False),
+            nn.Sigmoid(),  # 输出 0~1 的动态权重
+        )
+
+        # 2. 降维合并枢纽
         self.fusion_bridge = nn.Sequential(
             nn.LayerNorm(c1 * 2),
-            nn.Linear(c1 * 2, c1 * 2, bias=False),
+            nn.Linear(c1 * 2, c_mid, bias=False),
             nn.GELU(),
-            nn.Linear(c1 * 2, c1, bias=False),
-            nn.LayerNorm(c1)
+            nn.Linear(c_mid, c_mid, bias=False),
+            nn.LayerNorm(c_mid)
         )
 
         # 3. 单流深度推理阶段 (第 1 到 depth-1 层，交替移窗)
@@ -2471,14 +2496,20 @@ class Swin_Transformer_Fusion(nn.Module):
             # 因为第 0 层没移窗，所以第 1 层开启移窗，后续交替
             shift_opt = (i % 2 != 0)
             self.self_reasoning.append(
-                Swin_Self_Reasoning_Block(c1, num_heads, window_size, shift=shift_opt)
+                Swin_Self_Reasoning_Block(c_mid, mid_heads, window_size, shift=shift_opt)
             )
 
+        self.expand_bridge = nn.Sequential(
+            nn.Linear(c_mid, c1, bias=False),
+            nn.LayerNorm(c1),
+        )
+        self.norm_final = nn.LayerNorm(c1)
+
     def forward(self, x):
-        # 预处理：解析输入并转为 Transformer 需要的 BHWC
+        # 解析输入并转为 Transformer 需要的 BHWC
         if isinstance(x, list):
-            rgb = x[0].permute(0, 2, 3, 1).contiguous()
-            thm = x[1].permute(0, 2, 3, 1).contiguous()
+            rgb = x[0].permute(0, 2, 3, 1)
+            thm = x[1].permute(0, 2, 3, 1)
         else:
             # 如果是 Concat 层传进来的单张量 [B, c1*2, H, W]
             x = x.permute(0, 2, 3, 1).contiguous()
@@ -2486,19 +2517,44 @@ class Swin_Transformer_Fusion(nn.Module):
             rgb = x[..., :c1]
             thm = x[..., c1:]
 
+        # if self.training:
+        #
+        # drop_rate = 0.3
+        # if torch.rand(1) < drop_rate:
+        #     # 完全置零 修改 激活RGB
+        #     thm = thm * 0.0
+
         # Stage 1: 跨模态握手 (双向交互特征对齐)
         rgb, thm = self.cross_align(rgb, thm)
 
         # Stage 2: 降维融合 (拼接后送入 mlp 降维)
         fused = torch.cat([rgb, thm], dim=-1)  # [B, H, W, c1*2]
+
+        # 获取全局上下文 (Global Context) 提取特征
+        avg_ctx = fused.mean(dim=(1, 2), keepdim=True)  # [B, 1, 1, 2*c1]
+        max_ctx = torch.amax(fused, dim=(1, 2), keepdim=True)  # [B, 1, 1, 2*c1]
+
+        # 拼接均值和最大值，根据提取的特征算出权重
+        ctx = torch.cat([avg_ctx, max_ctx], dim=-1)
+        gate_weights = self.modality_gate(ctx)  # [B, 1, 1, c1*2]
+
+        # print(f"Gate Mean: {gate_weights.mean().item()}")
+        ### 修改
+        # 门控加权：如果 RGB 是噪声，它的通道权重会自动被压低到接近 0
+        fused = fused * (1.0 + torch.clamp(gate_weights, max=1.0))
+
+        # Stage 2: 降维融合
         fused = self.fusion_bridge(fused)  # [B, H, W, c1]
 
         # Stage 3: 深度上下文推理 (Shift 循环)
         for layer in self.self_reasoning:
             fused = layer(fused)
 
+        fused = self.expand_bridge(fused)  # 恢复尺寸
+        fused = self.norm_final(fused)
         # 终点：换回 YOLO 架构所需的 BCHW 格式
         return fused.permute(0, 3, 1, 2).contiguous()
+
 
 # class PyramidShuffleLevel(nn.Module):
 #     """
@@ -2510,34 +2566,34 @@ class Swin_Transformer_Fusion(nn.Module):
 #         self.level_idx = level_idx  # 0代表输出P3, 1代表输出P4, 2代表输出P5
 #         self.S = shuffle_c          # 交换的通道数
 
-    # def forward(self, x):
-    #     # x 接收一个列表:[p3_tensor, p4_tensor, p5_tensor]
-    #     p3, p4, p5 = x
-    #     S = self.S
-    #
-    #     if self.level_idx == 0:  # 目标是重构 P3
-    #         # 保留 P3 原本的 (C3 - S) 个通道，从 P4 抓取 S 个通道并上采样
-    #         p3_keep = p3[:, :-S, :, :]
-    #         p4_grab = p4[:, -S:, :, :]
-    #         p4_up = F.interpolate(p4_grab, size=p3.shape[2:], mode='nearest')
-    #         return torch.cat([p3_keep, p4_up], dim=1)
-    #
-    #     elif self.level_idx == 1:  # 目标是重构 P4
-    #         # 保留 P4 原本的 (C4 - 2S) 个通道，从 P3 和 P5 各抓取 S 个通道
-    #         p4_keep = p4[:, :-2*S, :, :]
-    #         p3_grab = p3[:, -S:, :, :]
-    #         p5_grab = p5[:, -S:, :, :]
-    #         # P3 下采样，P5 上采样，对齐到 P4 尺寸
-    #         p3_down = F.adaptive_avg_pool2d(p3_grab, output_size=p4.shape[2:])
-    #         p5_up = F.interpolate(p5_grab, size=p4.shape[2:], mode='nearest')
-    #         return torch.cat([p4_keep, p3_down, p5_up], dim=1)
-    #
-    #     elif self.level_idx == 2:  # 目标是重构 P5
-    #         # 保留 P5 原本的 (C5 - S) 个通道，从 P4 抓取 S 个通道并下采样
-    #         p5_keep = p5[:, :-S, :, :]
-    #         p4_grab = p4[:, -S:, :, :]
-    #         p4_down = F.adaptive_avg_pool2d(p4_grab, output_size=p5.shape[2:])
-    #         return torch.cat([p5_keep, p4_down], dim=1)
+# def forward(self, x):
+#     # x 接收一个列表:[p3_tensor, p4_tensor, p5_tensor]
+#     p3, p4, p5 = x
+#     S = self.S
+#
+#     if self.level_idx == 0:  # 目标是重构 P3
+#         # 保留 P3 原本的 (C3 - S) 个通道，从 P4 抓取 S 个通道并上采样
+#         p3_keep = p3[:, :-S, :, :]
+#         p4_grab = p4[:, -S:, :, :]
+#         p4_up = F.interpolate(p4_grab, size=p3.shape[2:], mode='nearest')
+#         return torch.cat([p3_keep, p4_up], dim=1)
+#
+#     elif self.level_idx == 1:  # 目标是重构 P4
+#         # 保留 P4 原本的 (C4 - 2S) 个通道，从 P3 和 P5 各抓取 S 个通道
+#         p4_keep = p4[:, :-2*S, :, :]
+#         p3_grab = p3[:, -S:, :, :]
+#         p5_grab = p5[:, -S:, :, :]
+#         # P3 下采样，P5 上采样，对齐到 P4 尺寸
+#         p3_down = F.adaptive_avg_pool2d(p3_grab, output_size=p4.shape[2:])
+#         p5_up = F.interpolate(p5_grab, size=p4.shape[2:], mode='nearest')
+#         return torch.cat([p4_keep, p3_down, p5_up], dim=1)
+#
+#     elif self.level_idx == 2:  # 目标是重构 P5
+#         # 保留 P5 原本的 (C5 - S) 个通道，从 P4 抓取 S 个通道并下采样
+#         p5_keep = p5[:, :-S, :, :]
+#         p4_grab = p4[:, -S:, :, :]
+#         p4_down = F.adaptive_avg_pool2d(p4_grab, output_size=p5.shape[2:])
+#         return torch.cat([p5_keep, p4_down], dim=1)
 
 class PyramidShuffleLevel(nn.Module):
     """
@@ -2584,14 +2640,15 @@ class PyramidShuffleLevel(nn.Module):
             out = torch.cat([p5_keep, p4_down], dim=1)
 
         return self.proj(out)
-    
+
 
 class MLP(nn.Module):
     """
     一个简单的两层MLP模块，用于通道注意力和门控机制。
     包含两个全连接层、一个ReLU激活函数和一个可选的Sigmoid激活函数。
     """
-    def __init__(self, in_channels,reduction_ratio=16, use_sigmoid=True):
+
+    def __init__(self, in_channels, reduction_ratio=16, use_sigmoid=True):
         super(MLP, self).__init__()
         self.use_sigmoid = use_sigmoid
         self.fc = nn.Sequential(
@@ -2600,29 +2657,32 @@ class MLP(nn.Module):
             nn.Linear(in_channels // reduction_ratio, in_channels, bias=False)
         )
         self.sigmoid = nn.Sigmoid()
+
     def forward(self, x):
         out = self.fc(x)
         if self.use_sigmoid:
             out = self.sigmoid(out)
         return out
 
+
 class ModifiedBGIM(nn.Module):
     """
     修改后的双向门控交互模块 (Modified Bidirectional Gated Interaction Module)
-    
+
     该模块将通道注意力(Wc)和空间注意力(Ws)的融合方式从乘法改为了加权求和。
     """
+
     def __init__(self, c1, reduction_ratio=16):
         """
         初始化模块。
-        
+
         Args:
             c1 (int): 输入特征图的通道数 (对于单个模态)。
             reduction_ratio (int): MLP中用于降低通道数的缩减比。
         """
         super(ModifiedBGIM, self).__init__()
         in_channels = c1
-        
+
         # ----------- 1. 通道注意力 (Wc) 计算部分 -----------
         # MLP将接收来自两个模态的平均池化和最大池化结果，因此输入通道数为 in_channels * 4
         self.channel_attention_mlp = MLP(in_channels * 4, reduction_ratio)
@@ -2632,8 +2692,10 @@ class ModifiedBGIM(nn.Module):
 
         # ----------- 3. 新的加权求和融合部分 -----------
         # 定义两个可学习的标量参数 a 和 b，用于加权 Wc 和 Ws
-        self.a = nn.Parameter(torch.ones(1))
-        self.b = nn.Parameter(torch.ones(1))
+        # self.a = nn.Parameter(torch.ones(1))
+        # self.b = nn.Parameter(torch.ones(1))
+
+        self.fusion_weight = nn.Parameter(torch.tensor(0.5))
 
         # ----------- 4. 门控机制 (Wg) 计算部分 -----------
         # 门控MLP接收两个模态展平后的特征，输入维度是 H*W*C * 2
@@ -2643,20 +2705,26 @@ class ModifiedBGIM(nn.Module):
 
         # ----------- 5. 融合输出部分 -----------
         # 兼容现有网络结构，将两个通道合并并降噪
+        # self.fuse_layer = nn.Sequential(
+        #     nn.Conv2d(in_channels * 2, in_channels, kernel_size=1, bias=False),
+        #     nn.BatchNorm2d(in_channels),
+        #     nn.SiLU(inplace=True)
+        # )
         self.fuse_layer = nn.Sequential(
-            nn.Conv2d(in_channels * 2, in_channels, kernel_size=1, bias=False),
+            nn.Conv2d(in_channels * 2, in_channels, kernel_size=3, padding=1, groups=in_channels, bias=False),
+            # 深度可分离卷积，增加空间感知
+            nn.Conv2d(in_channels, in_channels, kernel_size=1, bias=False),  # 通道投影
             nn.BatchNorm2d(in_channels),
             nn.SiLU(inplace=True)
         )
 
-
     def forward(self, x):
         """
         前向传播函数。
-        
+
         Args:
             x (list or Tuple): [F_vi, F_ir] 来自分支的特征图，或者是拼接的tensor。
-            
+
         Returns:
             torch.Tensor: 融合后的特征图。
         """
@@ -2664,11 +2732,11 @@ class ModifiedBGIM(nn.Module):
             F_vi, F_ir = x[0], x[1]
         else:
             F_vi, F_ir = torch.chunk(x, 2, dim=1)
-            
+
         B, C, H, W = F_vi.size()
 
         # ==================== 阶段一: 联合注意力权重计算 ====================
-        
+
         # --- 1. 计算通道注意力权重 Wc  ---
         # 全局平均池化和最大池化
         avg_pool_vi = F.adaptive_avg_pool2d(F_vi, (1, 1)).view(B, C)
@@ -2677,31 +2745,35 @@ class ModifiedBGIM(nn.Module):
         max_pool_ir = F.adaptive_max_pool2d(F_ir, (1, 1)).view(B, C)
 
         # 拼接四个向量
-        combined_features = torch.cat([avg_pool_vi, max_pool_vi, avg_pool_ir, max_pool_ir], dim=1) # shape: (B, 4*C)
-        
+        combined_features = torch.cat([avg_pool_vi, max_pool_vi, avg_pool_ir, max_pool_ir], dim=1)  # shape: (B, 4*C)
+
         # 送入MLP并激活，得到通道注意力权重
-        Wc_combined = self.channel_attention_mlp(combined_features) # shape: (B, 4*C)
+        Wc_combined = self.channel_attention_mlp(combined_features)  # shape: (B, 4*C)
         # 将其Reshape成可以与特征图广播的形状 (B, 2*C, 1, 1)，其中前C个给vi,后C个给ir
         # 假设MLP直接输出4C维向量，这里我们取前2C
-        Wc = Wc_combined[:, :2*C].view(B, 2*C, 1, 1)
+        Wc = Wc_combined[:, :2 * C].view(B, 2 * C, 1, 1)
 
         # --- 2. 计算空间注意力权重 Ws  ---
         # 沿通道维度拼接特征
-        F_cat = torch.cat((F_vi, F_ir), dim=1) # shape: (B, 2*C, H, W)
-        
+        F_cat = torch.cat((F_vi, F_ir), dim=1)  # shape: (B, 2*C, H, W)
+
         # 沿通道维度进行平均池化和最大池化
         avg_pool_s = torch.mean(F_cat, dim=1, keepdim=True)
         max_pool_s, _ = torch.max(F_cat, dim=1, keepdim=True)
-        
+
         # 激活后相加，得到空间注意力权重
-        Ws = torch.sigmoid(avg_pool_s) + torch.sigmoid(max_pool_s) # shape: (B, 1, H, W)
+        # Ws = torch.sigmoid(avg_pool_s) + torch.sigmoid(max_pool_s) # shape: (B, 1, H, W)
+        avg_s_act = torch.sigmoid(torch.clamp(avg_pool_s, min=-10, max=10))
+        max_s_act = torch.sigmoid(torch.clamp(max_pool_s, min=-10, max=10))
+        Ws = avg_s_act + max_s_act
 
         # --- 3. (核心修改) 加权求和得到混合权重 Wcs ---
         # Wc (B, 2C, 1, 1) 和 Ws (B, 1, H, W) 会被自动广播 (broadcasting)
-        Wcs = self.a * Wc + self.b * Ws # shape: (B, 2C, H, W)
-        
+        alpha = torch.sigmoid(self.fusion_weight)
+        Wcs = alpha * Wc + (1.0 - alpha) * Ws
+
         # --- 4. 分割(Split)混合权重 (对应公式5的后半部分) ---
-        Wcs_vi, Wcs_ir = torch.split(Wcs, C, dim=1) # shape: (B, C, H, W) for each
+        Wcs_vi, Wcs_ir = torch.split(Wcs, C, dim=1)  # shape: (B, C, H, W) for each
 
         # ==================== 阶段二: 门控纠正与特征更新 ====================
 
@@ -2709,22 +2781,30 @@ class ModifiedBGIM(nn.Module):
         # 为简化和鲁棒性，先对输入特征做全局平均池化再展平
         g_vi = F.adaptive_avg_pool2d(F_vi, (1, 1)).view(B, -1)
         g_ir = F.adaptive_avg_pool2d(F_ir, (1, 1)).view(B, -1)
-        
+
         # 拼接后送入MLP得到门控权重
         gate_input = torch.cat((g_vi, g_ir), dim=1)
-        Wg_vector = self.gate_mlp(gate_input) # shape: (B, 2*C)
-        
+        Wg_vector = self.gate_mlp(gate_input)  # shape: (B, 2*C)
+
         # Reshape成可以与特征图广播的形状
-        Wg = Wg_vector[:, :C].view(B, C, 1, 1) # 只取前C个维度作为门控，也可以设计别的结构
+        Wg = Wg_vector[:, :C].view(B, C, 1, 1)  # 只取前C个维度作为门控，也可以设计别的结构
 
         # --- 6. 使用门控权重进行纠正  ---
-        Wcsg_vis = Wcs_vi * Wg
-        Wcsg_ir = Wcs_ir * (1 - Wg)
-        
-        # --- 7. 更新原始特征  ---
-        # 使用残差连接的方式，将权重乘回原特征
-        F_vi_out = F_vi * (1 + Wcsg_vis)
-        F_ir_out = F_ir * (1 + Wcsg_ir)
+        # Wcsg_vis = Wcs_vi * Wg
+        # Wcsg_ir = Wcs_ir * (1 - Wg)
+
+        # # --- 7. 更新原始特征  ---
+        # # 使用残差连接的方式，将权重乘回原特征
+        # F_vi_out = F_vi * (1 + Wcsg_vis)
+        # F_ir_out = F_ir * (1 + Wcsg_ir)
+
+        soft_Wg = 0.5 + 0.5 * Wg
+
+        Wcsg_vis = Wcs_vi * soft_Wg
+        Wcsg_ir = Wcs_ir * (1.0 - soft_Wg + 0.5)  # 同样给 IR 适当保底
+
+        F_vi_out = F_vi * (1.0 + Wcsg_vis)
+        F_ir_out = F_ir * (1.0 + Wcsg_ir)
 
         # 拼接并降维，输出C个通道，匹配CBAMFusion输出维度
         out = self.fuse_layer(torch.cat([F_vi_out, F_ir_out], dim=1))

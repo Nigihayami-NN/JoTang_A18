@@ -120,8 +120,7 @@ class BaseDataset(Dataset):
         # self.ni = len(self.labels)//2  # number of images
 
 
-        # 【核心修正】：如果文件夹里 RGB 和红外混放，我们只保留一半的文件索引
-        # 这样 ni 和后续所有的计算（bi, ar）才能对齐
+        # 【核心修改】：如果文件夹里 RGB 和红外混放，我们只保留一半的文件索引
         # --- 1. 先获取所有文件路径 ---
         self.im_files = self.get_img_files(self.img_path)
 
@@ -337,58 +336,37 @@ class BaseDataset(Dataset):
     #     return self.ims[i], self.im_hw0[i], self.im_hw[i]
 
     def load_image(self, i: int, rect_mode: bool = True) -> tuple[np.ndarray, tuple[int, int], tuple[int, int]]:
-        """
-        最终适配版：支持 [id]_co.png 和 [id]_ir.png 同文件夹结构。
-        """
-        # 1. 检查内存缓存
         if self.ims[i] is not None:
             return self.ims[i], self.im_hw0[i], self.im_hw[i]
 
-        # 2. 定义文件路径 (i 对应 self.im_files[i]，即 [id]_co.png)
-        f = self.im_files[i]
-        f_rgb = str(f)
+        f_rgb = self.im_files[i]
+        f_ir = f_rgb.replace('_co.jpg', '_ir.jpg')
 
-        # 无论后缀是 .png 还是 .jpg 都能处理
-        f_ir = f_rgb.replace('_co', '_ir')
-
-        # 3. 读取图像
         im_rgb = cv2.imread(f_rgb)
         im_ir = cv2.imread(f_ir, cv2.IMREAD_GRAYSCALE)
 
-        if im_rgb is None:
-            raise FileNotFoundError(f"找不到 RGB 图片: {f_rgb}")
-        if im_ir is None:
-            raise FileNotFoundError(f"找不到配对的 IR 图片: {f_ir}。请检查文件名是否严格对应 _co.png 和 _ir.png")
+        if im_rgb is None or im_ir is None:
+            raise FileNotFoundError(f"无法读取图片对: {f_rgb}")
 
-        # 4. 统一 RGB 维度为 (H, W, 3)
+        # --- 强制维度锁定 ---
+        # 1. 确保 RGB 永远是 (H, W, 3)
         if im_rgb.ndim == 2:
             im_rgb = cv2.cvtColor(im_rgb, cv2.COLOR_GRAY2BGR)
         elif im_rgb.shape[2] == 4:
             im_rgb = im_rgb[:, :, :3]
 
-        # 5. 统一 IR 维度为 (H, W, 1)
-        if im_ir.ndim == 2:
-            im_ir = im_ir[:, :, np.newaxis]
+        # 2. 确保 IR 永远是 (H, W, 1)
+        # 无论它读进来是什么样，强行 resize 并 reshape
+        h_rgb, w_rgb = im_rgb.shape[:2]
+        if im_ir.shape[:2] != (h_rgb, w_rgb):
+            im_ir = cv2.resize(im_ir, (w_rgb, h_rgb), interpolation=cv2.INTER_LINEAR)
 
-        # 6. 强制对齐空间分辨率
-        if im_rgb.shape[:2] != im_ir.shape[:2]:
-            im_ir = cv2.resize(im_ir, (im_rgb.shape[1], im_rgb.shape[0]), interpolation=cv2.INTER_LINEAR)
-            if im_ir.ndim == 2:
-                im_ir = im_ir[:, :, np.newaxis]
+        im_ir = im_ir.reshape(h_rgb, w_rgb, 1)  # 这一步是消除 (512, 640) vs (512, 640, 1) 的关键
 
-        # 7. 拼接成 4 通道 (H, W, 4)
-        im = np.concatenate([im_rgb, im_ir], axis=-1)
+        # 3. 拼接
+        im = np.concatenate([im_rgb, im_ir], axis=-1)  # 现在绝对是 (H, W, 4)
 
-        # 8. YOLO 标准 Resize 逻辑
         h0, w0 = im.shape[:2]
-        r = self.imgsz / max(h0, w0)
-        if r != 1:
-            w, h = (min(math.ceil(w0 * r), self.imgsz), min(math.ceil(h0 * r), self.imgsz))
-            im = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
-            if im.ndim == 2:
-                im = im[:, :, np.newaxis]
-
-        # 9. 更新缓存
         if self.augment:
             self.ims[i], self.im_hw0[i], self.im_hw[i] = im, (h0, w0), im.shape[:2]
 
@@ -510,25 +488,45 @@ class BaseDataset(Dataset):
         """Return transformed label information for given index."""
         return self.transforms(self.get_image_and_label(index))
 
+    # def get_image_and_label(self, index: int) -> dict[str, Any]:
+    #     """Get and return label information from the dataset.
+    #
+    #     Args:
+    #         index (int): Index of the image to retrieve.
+    #
+    #     Returns:
+    #         (dict[str, Any]): Label dictionary with image and metadata.
+    #     """
+    #     label = deepcopy(self.labels[index])  # requires deepcopy() https://github.com/ultralytics/ultralytics/pull/1948
+    #     label.pop("shape", None)  # shape is for rect, remove it
+    #     label["img"], label["ori_shape"], label["resized_shape"] = self.load_image(index)
+    #     label["ratio_pad"] = (
+    #         label["resized_shape"][0] / label["ori_shape"][0],
+    #         label["resized_shape"][1] / label["ori_shape"][1],
+    #     )  # for evaluation
+    #     if self.rect:
+    #         label["rect_shape"] = self.batch_shapes[self.batch[index]]
+    #     return self.update_labels_info(label)
     def get_image_and_label(self, index: int) -> dict[str, Any]:
-        """Get and return label information from the dataset.
+        """原封不动读取标签，不做任何坐标偏移"""
+        label = deepcopy(self.labels[index])
+        label.pop("shape", None)
 
-        Args:
-            index (int): Index of the image to retrieve.
-
-        Returns:
-            (dict[str, Any]): Label dictionary with image and metadata.
-        """
-        label = deepcopy(self.labels[index])  # requires deepcopy() https://github.com/ultralytics/ultralytics/pull/1948
-        label.pop("shape", None)  # shape is for rect, remove it
+        # 1. 读入已经洗好的 4 通道图 (640x512)
         label["img"], label["ori_shape"], label["resized_shape"] = self.load_image(index)
+
+        # 2. 计算 ratio_pad (由于 imgsz=1024，这里官方代码会自动处理后续的缩放)
         label["ratio_pad"] = (
             label["resized_shape"][0] / label["ori_shape"][0],
             label["resized_shape"][1] / label["ori_shape"][1],
-        )  # for evaluation
+        )
+
         if self.rect:
             label["rect_shape"] = self.batch_shapes[self.batch[index]]
+
+        # 3. 直接返回，让子类 YOLODataset 的 update_labels_info 去处理 bboxes -> instances
         return self.update_labels_info(label)
+
 
     def __len__(self) -> int:
         """Return the length of the labels list for the dataset."""

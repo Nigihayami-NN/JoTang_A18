@@ -1,0 +1,34 @@
+find /root/autodl-tmp/A18/CustomDataSet -name "*.cache" -delete
+
+cd /root/autodl-tmp/A18
+
+python -u m_train.py > /root/autodl-tmp/A18/train.log 2>&1 &
+tail -f /root/autodl-tmp/A18/train.log
+
+# 生成清单：只包含可见光图片
+find /root/autodl-tmp/A18/CustomDataSet/images/train -name "*_co.jpg" | sort > train.txt
+find /root/autodl-tmp/A18/CustomDataSet/images/val -name "*_co.jpg" | sort > val.txt
+
+# 核对一下数量，确保不是 0
+wc -l train.txt val.txt
+autodl-tmp/VisDrone-DroneVehicle(3).rar
+unrar x VisDrone-DroneVehicle(3).rar /root/autodl-tmp/CustomDataSet/
+
+# 使用 -d 参数指定目录
+unzip -q autodl-tmp/CustomDataSet.zip -d /root/autodl-tmp/A18
+
+
+cd /root/autodl-tmp/
+# 指向第一个分卷，-o 后面紧跟路径（不要留空格）
+7z x CustomDataSet.7z.001 -o/root/autodl-tmp/A18/CustomDataSet
+
+ls | head -n 10
+
+tmux new -s train
+tmux attach -t train
+
+cd /root/autodl-tmp
+# 查看回收站占用空间
+du -sh .Trash-0
+# 清空回收站（谨慎执行）
+rm -rf .Trash-0

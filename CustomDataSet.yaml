@@ -1,23 +1,35 @@
 # JoTang_A18
 # ├── ultralytics
-# └── CustomDataSet
+# └── CustomDataSet_test
 #        |- images
 #        |- labels
             
-path: ./CustomDataSet # dataset root dir
-train: images/train # train images (relative to 'path')
-val: images/val # val images (relative to 'path') 
-test: images/test # test images (relative to 'path') 
+#path: ./CustomDataSet_test # dataset root dir
+#train: images/train # train images (relative to 'path')
+#val: images/val # val images (relative to 'path')
+#test: images/test # test images (relative to 'path')
+#
+## Classes (共10个类别，编号0-9)
+#names:
+#  0: car           # 小轿车/小汽车
+#  1: pickup        # 皮卡车
+#  2: camping       # 房车/露营车
+#  3: truck         # 卡车/货车
+#  4: other         # 其他车辆
+#  5: tractor       # 拖拉机
+#  6: boat          # 船只
+#  7: van           # 面包车/厢式货车
+#  8: bus           # 公交车/巴士 (新增)
+#  9: freight car   # 货运车厢/火车货车 (新增)
 
-# Classes (共10个类别，编号0-9)
+train: /root/autodl-tmp/A18/train.txt
+val: /root/autodl-tmp/A18/val.txt
+test: /root/autodl-tmp/A18/test.txt # test images (relative to 'path')
+
 names:
-  0: car           # 小轿车/小汽车
-  1: pickup        # 皮卡车
-  2: camping       # 房车/露营车
-  3: truck         # 卡车/货车
-  4: other         # 其他车辆
-  5: tractor       # 拖拉机
-  6: boat          # 船只
-  7: van           # 面包车/厢式货车
-  8: bus           # 公交车/巴士 (新增)
-  9: freight car   # 货运车厢/火车货车 (新增)
+  0: car
+  1: truck
+  2: bus
+  3: van
+  4: freight_car
+

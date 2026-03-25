@@ -1686,7 +1686,7 @@ def parse_model(d, ch, verbose=True):
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
 
-            # === 你的竞赛模块专属拦截区 (请精确复制这段) ===
+            # === 拦截区===
 
         elif m.__name__ == "PyramidShuffleLevel":
 
@@ -1722,9 +1722,21 @@ def parse_model(d, ch, verbose=True):
 
             args = [c2, *args[1:]]
 
+        elif m in {OBB, OBB26}:
+            # . 提取输入通道列表
+            input_channels = [ch[x] for x in f]  # 得到 [128, 256, 512, 1024]
 
-        # ============================================
+            # 2. 这里的 args 初始来自 YAML 的 [nc, 1]
+            nc_val = args[0]
+            ne_val = args[1]
 
+            # 3. 按照 OBB.__init__ (nc, ne, reg_max, end2end, ch) 的顺序重新组装
+            # 注意：必须确保这里的顺序和你的 head.py 里的 OBB.__init__ 声明完全一致
+            args = [nc_val, ne_val, reg_max, end2end, input_channels]
+
+            # 4. 设置 legacy 属性
+            m.legacy = legacy
+        # ======
 
 
         elif m in frozenset(
@@ -1738,8 +1750,6 @@ def parse_model(d, ch, verbose=True):
                 YOLOESegment26,
                 Pose,
                 Pose26,
-                OBB,
-                OBB26,
             }
         ):
             args.extend([reg_max, end2end, [ch[x] for x in f]])
@@ -1749,6 +1759,9 @@ def parse_model(d, ch, verbose=True):
                 m.legacy = legacy
         elif m is v10Detect:
             args.append([ch[x] for x in f])
+
+
+
         elif m is ImagePoolingAttn:
             args.insert(1, [ch[x] for x in f])  # channels as second arg
         elif m is RTDETRDecoder:  # special case, channels arg must be passed in index 1

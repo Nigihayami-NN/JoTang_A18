@@ -1,6 +1,27 @@
-import torch
 import os
+
+os.environ["OMP_NUM_THREADS"] = "16"
+
+import torch
+import time
+import gc
 from ultralytics import YOLO
+
+start_train_time = time.time()
+MAX_RUNTIME_SECONDS = 9400
+
+
+def on_train_epoch_end(trainer):
+    """
+    每个 Epoch 结束后触发
+    """
+    gc.collect()  # 回收 Python 层的垃圾
+    torch.cuda.empty_cache()
+
+    # elapsed = time.time() - start_train_time
+    # if elapsed > (MAX_RUNTIME_SECONDS - 600):
+    #     trainer.save_checkpoint() # 强制保存当前的 last.pt
+    #     exit(0) # 优雅退出，确保文件写完
 
 
 def transplant_and_train():
@@ -9,11 +30,13 @@ def transplant_and_train():
     # ==========================================
     YAML_PATH = "m-test.yaml"  # 你另存为的 M 版配置
     # DATA_YAML = "test_bus.yaml"
-    DATA_YAML = "CustomDataSet.yaml"
+    DATA_YAML = "CustomDataSet_test.yaml"
 
     # 【关键修改】：换成 M 级官方权重
     OFFICIAL_PT = "yolo26m.pt"
-    INIT_PT = "weights/rgbt_v26M_init.pt"
+    # INIT_PT = "weights/rgbt_v26M_init.pt"
+    # INIT_PT = "runs/obb/m_obb/m-test6/weights/last.pt"
+    INIT_PT = "runs/obb/m_obb/m-test10/weights/best.pt"
 
     # ==========================================
     # 2. 权重移植逻辑 (一键无缝转换)
@@ -62,14 +85,38 @@ def transplant_and_train():
     # 重新加载带有预训练权重的模型
     model = YOLO(INIT_PT)
 
+    for m in model.model.modules():
+        if hasattr(m, 'gradient_checkpointing'):
+            # 大部分 Swin 和 C3k2 模块都支持这个属性
+            m.gradient_checkpointing = True
+
+    for name, m in model.model.named_modules():
+        if 'Swin' in name or 'C3k2' in name:
+            m.gradient_checkpointing = True
+
+    model.add_callback("on_train_epoch_end", on_train_epoch_end)
+
     # 核心训练参数 (专门针对无人机 RGBT 和大算力优化)
     results = model.train(
         data=DATA_YAML,
+        task="obb",
         imgsz=1024,  # 训练分辨率 (4090 的黄金尺寸)
-        epochs=150,  # 国家级比赛必须跑到 300 轮
-        batch=16,  # 4090 可以尝试 16，如果 OOM 则改为 8 且设置 accumulate=2
+        epochs=40,
+        batch=4,  # 4090 可以尝试 16，如果 OOM 则改为 8 且设置 accumulate=2
+        # accumulate=16,
         device=0,  # 指定显卡
         amp=True,  # 混合精度 (加速且省显存)
+        deterministic=False,
+        rect=False,
+        workers=2,
+        cache='ram',
+        max_det=100,  # 航拍不需要 300 个框，100 个足够
+        conf=0.01,
+
+        angle=2.0,
+        cls=2.0,
+        box=5.0,
+        cos_lr=True,
 
         # --- 针对 4 通道的必须设置 ---
         hsv_h=0.0,  # 绝对禁用色调增强 (防止 cv2 崩溃)
@@ -77,9 +124,12 @@ def transplant_and_train():
         hsv_v=0.0,  # 绝对禁用亮度增强
 
         # --- 针对小目标的高级增强 ---
-        mosaic=1.0,  # 100% 开启马赛克增强
-        mixup=0.15,  # 引入少量 Mixup 增加背景鲁棒性
-        multi_scale=True,  # 开启多尺度训练 (极其重要！让模型适应各种高度的车辆)
+        mosaic=1.00,  # 100% 开启马赛克增强
+        mixup=0.1,  # 引入少量 Mixup 增加背景鲁棒性
+        degrees=15.0,
+        shear=0.0,
+        multi_scale=False,  # 开启多尺度训练 (极其重要！让模型适应各种高度的车辆)
+        # close_mosaic=10,
 
         # mosaic=0.0,  # 关闭马赛克
         # mixup=0.0,  # 关闭 Mixup
@@ -87,12 +137,18 @@ def transplant_and_train():
 
         # --- 优化器与日志 ---
         optimizer='AdamW',  # Transformer 架构的首选优化器
-        lr0=0.001,  # AdamW 初始学习率建议比 SGD 小一点
+        lr0=0.00002,  # AdamW 初始学习率建议比 SGD 小一点
         warmup_epochs=5,  # 给 Swin 层 5 个 Epoch 慢慢预热，防止初期梯度爆炸
+        # 从 5e-5 降到 1e-5，为了压制那个 pg2
+        warmup_bias_lr=0.00000,
 
-        project="Drone_RGBT_Runs",
-        name="YOLO26m-test",
-        save_period=10  # 每 10 轮保存一次权重，防止服务器意外断电
+        project="m_obb",
+        name="m-test",
+        # model="runs/obb/m_obb/m-test/weights/last.pt",
+        save_period=1,  # 每 10 轮保存一次权重，防止服务器意外断电
+        patience=30,
+        # cache=False,
+        resume=False,
     )
     print("训练结束！")
 
